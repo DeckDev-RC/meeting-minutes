@@ -1,5 +1,6 @@
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
+import { planPdfPageSlices } from './pdfLayout';
 
 const EXPORT_WIDTH_PX = 794;
 
@@ -103,38 +104,49 @@ export async function exportToPDF(
   try {
     await document.fonts?.ready;
 
-    const canvas = await html2canvas(surface.host, {
-      scale: 2,
-      useCORS: true,
-      backgroundColor: '#ffffff',
-      width: EXPORT_WIDTH_PX,
-      windowWidth: EXPORT_WIDTH_PX,
-      scrollX: 0,
-      scrollY: 0,
+    const pageContentHeight = pageHeight - margin * 2 - footerSpace;
+    const documentHeightPx = Math.max(
+      surface.host.scrollHeight,
+      Math.ceil(surface.host.getBoundingClientRect().height),
+      1,
+    );
+    const pageSlices = planPdfPageSlices({
+      documentHeightPx,
+      exportWidthPx: EXPORT_WIDTH_PX,
+      contentWidthMm: contentWidth,
+      pageContentHeightMm: pageContentHeight,
     });
 
-    const imgData = canvas.toDataURL('image/png');
-    const imgHeight = (canvas.height * contentWidth) / canvas.width;
+    for (let pageIndex = 0; pageIndex < pageSlices.length; pageIndex += 1) {
+      const page = pageSlices[pageIndex];
+      if (pageIndex > 0) pdf.addPage();
 
-    const pageContentHeight = pageHeight - margin * 2 - footerSpace;
-    const pageCount = Math.max(1, Math.ceil(imgHeight / pageContentHeight));
-
-    for (let page = 0; page < pageCount; page += 1) {
-      if (page > 0) pdf.addPage();
+      const canvas = await html2canvas(surface.host, {
+        scale: 2,
+        useCORS: true,
+        backgroundColor: '#ffffff',
+        width: EXPORT_WIDTH_PX,
+        height: page.sourceHeight,
+        windowWidth: EXPORT_WIDTH_PX,
+        windowHeight: page.sourceHeight,
+        scrollX: 0,
+        scrollY: 0,
+        y: page.sourceY,
+      });
 
       pdf.addImage(
-        imgData,
+        canvas,
         'PNG',
         margin,
-        margin - page * pageContentHeight,
+        margin,
         contentWidth,
-        imgHeight,
+        page.outputHeightMm,
         undefined,
         'FAST',
       );
       pdf.setFillColor(255, 255, 255);
       pdf.rect(0, margin + pageContentHeight, pageWidth, pageHeight - margin - pageContentHeight, 'F');
-      addPageFooter(pdf, page + 1, pageCount, title);
+      addPageFooter(pdf, pageIndex + 1, pageSlices.length, title);
     }
 
     const arrayBuffer = pdf.output('arraybuffer');

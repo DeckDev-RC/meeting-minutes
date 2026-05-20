@@ -5,6 +5,7 @@ use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 use tauri::command;
 use tauri_plugin_shell::ShellExt;
@@ -893,6 +894,14 @@ async fn export_smart_chunks_parallel(
     output_format: String,
     plans: Vec<ChunkPlan>,
 ) -> Result<Vec<ExportedChunk>, String> {
+    let parallelism = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(4)
+        .clamp(2, 6)
+        .min(plans.len().max(1));
+    let input_path = Arc::<str>::from(input_path);
+    let output_dir = Arc::<str>::from(output_dir);
+    let output_format = Arc::<str>::from(output_format);
     let export_results = stream::iter(plans.into_iter())
         .map(|plan| {
             let app = app.clone();
@@ -901,8 +910,12 @@ async fn export_smart_chunks_parallel(
             let output_format = output_format.clone();
             async move {
                 let chunk_duration = plan.end_sec - plan.start_sec;
-                let audio_path = Path::new(&output_dir)
-                    .join(format!("chunk_{:03}.{}", plan.index, output_format))
+                let audio_path = Path::new(output_dir.as_ref())
+                    .join(format!(
+                        "chunk_{:03}.{}",
+                        plan.index,
+                        output_format.as_ref()
+                    ))
                     .to_string_lossy()
                     .to_string();
                 let start_arg = format!("{:.3}", plan.start_sec);
@@ -911,7 +924,7 @@ async fn export_smart_chunks_parallel(
                     "-ss".to_string(),
                     start_arg,
                     "-i".to_string(),
-                    input_path,
+                    input_path.to_string(),
                     "-t".to_string(),
                     duration_arg,
                     "-ar".to_string(),
@@ -919,7 +932,7 @@ async fn export_smart_chunks_parallel(
                     "-ac".to_string(),
                     "1".to_string(),
                 ];
-                args.extend(audio_codec_args(&output_format));
+                args.extend(audio_codec_args(output_format.as_ref()));
                 args.extend(["-y".to_string(), audio_path.clone()]);
 
                 let output = app
@@ -948,7 +961,7 @@ async fn export_smart_chunks_parallel(
                 })
             }
         })
-        .buffer_unordered(4)
+        .buffer_unordered(parallelism)
         .collect::<Vec<_>>()
         .await;
 

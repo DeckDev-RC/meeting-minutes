@@ -100,6 +100,16 @@ fn extract_gemini_stream_delta(line: &str) -> Result<Option<String>, String> {
         .map(ToString::to_string))
 }
 
+fn drain_complete_sse_lines(pending: &mut String) -> Vec<String> {
+    let mut lines = Vec::new();
+    while let Some(line_end) = pending.find('\n') {
+        let line = pending[..line_end].trim_end_matches('\r').to_string();
+        pending.drain(..line_end + 1);
+        lines.push(line);
+    }
+    lines
+}
+
 fn strip_markdown_code_fence(text: &str) -> String {
     let trimmed = text.trim();
     if !trimmed.starts_with("```") {
@@ -411,7 +421,47 @@ fn collect_insight_text(
     insights: &[MeetingChunkInsights],
     diarized: Option<&DiarizedResult>,
 ) -> String {
-    let mut text = String::new();
+    let mut estimated = diarized
+        .map(|diarized| {
+            diarized
+                .segments
+                .iter()
+                .map(|segment| segment.text.len() + 1)
+                .sum::<usize>()
+        })
+        .unwrap_or(0);
+    for insight in insights {
+        estimated += insight.summary.len() + 1;
+        estimated += insight
+            .topics
+            .iter()
+            .map(|item| item.len() + 1)
+            .sum::<usize>();
+        estimated += insight
+            .decisions
+            .iter()
+            .map(|item| item.title.len() + item.owner.len() + item.evidence.len() + 3)
+            .sum::<usize>();
+        estimated += insight
+            .actions
+            .iter()
+            .map(|item| {
+                item.task.len() + item.owner.len() + item.deadline.len() + item.evidence.len() + 4
+            })
+            .sum::<usize>();
+        estimated += insight
+            .questions
+            .iter()
+            .map(|item| item.len() + 1)
+            .sum::<usize>();
+        estimated += insight
+            .risks
+            .iter()
+            .map(|item| item.len() + 1)
+            .sum::<usize>();
+    }
+
+    let mut text = String::with_capacity(estimated);
 
     if let Some(diarized) = diarized {
         for segment in &diarized.segments {
@@ -456,6 +506,26 @@ fn collect_insight_text(
     }
 
     text
+}
+
+fn char_eq_ignore_case(left: char, right: char) -> bool {
+    left.to_lowercase().eq(right.to_lowercase())
+}
+
+fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+
+    let needle_chars = needle.chars().collect::<Vec<_>>();
+    haystack.char_indices().any(|(start, _)| {
+        haystack[start..]
+            .chars()
+            .zip(needle_chars.iter().copied())
+            .take_while(|(left, right)| char_eq_ignore_case(*left, *right))
+            .count()
+            == needle_chars.len()
+    })
 }
 
 fn build_name_aliases(
@@ -1176,7 +1246,6 @@ fn minutes_html_is_low_quality(html: &str, insights: &[MeetingChunkInsights]) ->
         return true;
     }
 
-    let lower = trimmed.to_lowercase();
     let placeholder_markers = [
         "[data",
         "[hora",
@@ -1190,7 +1259,7 @@ fn minutes_html_is_low_quality(html: &str, insights: &[MeetingChunkInsights]) ->
     ];
     if placeholder_markers
         .iter()
-        .any(|marker| lower.contains(marker))
+        .any(|marker| contains_ignore_case(trimmed, marker))
     {
         return true;
     }
@@ -1218,11 +1287,11 @@ fn minutes_html_is_low_quality(html: &str, insights: &[MeetingChunkInsights]) ->
     let fact_count =
         action_count + decision_count + topic_count + question_count + risk_count + summary_count;
 
-    if action_count > 0 && !lower.contains("table-actions") {
+    if action_count > 0 && !contains_ignore_case(trimmed, "table-actions") {
         return true;
     }
 
-    if decision_count > 0 && !lower.contains("tag-decision") {
+    if decision_count > 0 && !contains_ignore_case(trimmed, "tag-decision") {
         return true;
     }
 
@@ -1700,9 +1769,7 @@ async fn stream_gemini_text(
         let chunk = chunk.map_err(|e| e.to_string())?;
         pending.push_str(&String::from_utf8_lossy(&chunk));
 
-        while let Some(line_end) = pending.find('\n') {
-            let line = pending[..line_end].trim_end_matches('\r').to_string();
-            pending = pending[line_end + 1..].to_string();
+        for line in drain_complete_sse_lines(&mut pending) {
             if let Some(delta) = extract_gemini_stream_delta(&line)? {
                 full_text.push_str(&delta);
                 emit_minutes_stream_delta(app, meeting_id, delta, false);
@@ -1884,6 +1951,15 @@ mod tests {
         );
         assert_eq!(extract_gemini_stream_delta("event: message").unwrap(), None);
         assert_eq!(extract_gemini_stream_delta("data: [DONE]").unwrap(), None);
+    }
+
+    #[test]
+    fn sse_pending_buffer_drains_complete_lines_without_losing_tail() {
+        let mut pending = String::from("data: one\r\ndata: two\npartial");
+        let lines = drain_complete_sse_lines(&mut pending);
+
+        assert_eq!(lines, vec!["data: one", "data: two"]);
+        assert_eq!(pending, "partial");
     }
 
     #[test]

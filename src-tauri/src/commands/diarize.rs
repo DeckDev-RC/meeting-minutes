@@ -344,20 +344,23 @@ fn overlap_seconds(segment_start: f64, segment_end: f64, turn_start: f64, turn_e
 }
 
 fn best_speaker_for_segment(segment: &TranscriptionSegment, turns: &[SpeakerTurn]) -> i32 {
-    let valid_turns = turns
-        .iter()
-        .filter(|turn| turn.end > turn.start)
-        .collect::<Vec<_>>();
     let mut best_speaker = None;
     let mut best_overlap = 0.0;
-    for turn in &valid_turns {
+    let mut nearest_speaker = None;
+    let mut nearest_distance = f64::INFINITY;
+    for turn in turns.iter().filter(|turn| turn.end > turn.start) {
         let overlap = overlap_seconds(segment.start, segment.end, turn.start, turn.end);
         if overlap > best_overlap {
             best_overlap = overlap;
             best_speaker = Some(turn.speaker_index);
         }
+        let distance = turn_distance_to_segment(segment, turn);
+        if distance < nearest_distance {
+            nearest_distance = distance;
+            nearest_speaker = Some(turn.speaker_index);
+        }
     }
-    best_speaker.unwrap_or_else(|| nearest_speaker_for_segment_sorted(segment, &valid_turns))
+    best_speaker.or(nearest_speaker).unwrap_or(0)
 }
 
 fn best_speakers_for_segments_sweep_iter<'a, I>(segments: I, turns: &[SpeakerTurn]) -> Vec<i32>

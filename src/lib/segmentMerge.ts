@@ -1,5 +1,10 @@
 import type { TranscriptionSegment } from "./types";
 
+function appendWithSequentialId(merged: TranscriptionSegment[], segment: TranscriptionSegment) {
+  segment.id = merged.length;
+  merged.push(segment);
+}
+
 export function mergeSortedTranscriptionSegments(
   left: TranscriptionSegment[],
   right: TranscriptionSegment[],
@@ -16,10 +21,10 @@ export function mergeSortedTranscriptionSegments(
       rightSegment === undefined ||
       (leftSegment !== undefined && leftSegment.start <= rightSegment.start)
     ) {
-      merged.push({ ...leftSegment, id: merged.length });
+      appendWithSequentialId(merged, leftSegment);
       leftIndex += 1;
     } else {
-      merged.push({ ...rightSegment, id: merged.length });
+      appendWithSequentialId(merged, rightSegment);
       rightIndex += 1;
     }
   }
