@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "thresholds": {
+    "minThroughputX": 3,
+    "maxRealTimeFactor": 0.35,
+    "minFactRecall": 0.7,
+    "minFactPrecision": 0.7
+  },
+  "cases": [
+    {
+      "id": "sample-long-meeting",
+      "title": "Sample long meeting",
+      "dataset": "MeetingBank",
+      "language": "en",
+      "durationSec": 1200,
+      "expectedSpeakers": 4,
+      "referenceItems": [
+        {
+          "id": "decision-001",
+          "kind": "decision",
+          "text": "The delivery schedule was approved.",
+          "requiredTerms": ["approved", "delivery schedule"]
+        },
+        {
+          "id": "action-001",
+          "kind": "action",
+          "text": "Ana must send the proposal.",
+          "requiredTerms": ["ana", "send", "proposal"]
+        },
+        {
+          "id": "question-001",
+          "kind": "question",
+          "text": "Who will validate the final spreadsheet?",
+          "requiredTerms": ["validate", "spreadsheet"]
+        }
+      ]
+    }
+  ]
+}

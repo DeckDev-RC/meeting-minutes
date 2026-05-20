@@ -1,0 +1,49 @@
+{
+  "name": "meeting-minutes",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "desktop": "tauri dev",
+    "dev:desktop": "tauri dev",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "test:e2e:ui": "playwright test",
+    "tauri": "tauri",
+    "eval:meeting": "node scripts/evaluateMeetingRun.mjs",
+    "benchmark:text": "node scripts/runTextBenchmark.mjs",
+    "benchmark:chunks": "cargo run --manifest-path src-tauri/Cargo.toml --bin chunk_export_benchmark --",
+    "setup:diarize-cpu": "python -m venv .venv-diarize && .venv-diarize\\\\Scripts\\\\python.exe -m pip install --upgrade pip && .venv-diarize\\\\Scripts\\\\python.exe -m pip install diarize==0.1.2",
+    "benchmark:diarize-cpu": ".venv-diarize\\\\Scripts\\\\python.exe scripts\\\\diarize_cpu_backend.py",
+    "compare:diarization": "node scripts/compareDiarizationBenchmarks.mjs",
+    "check:pyannote": "powershell -ExecutionPolicy Bypass -File scripts\\\\check_hf_pyannote_access.ps1",
+    "setup:pyannote": "python -m venv .venv-pyannote && .venv-pyannote\\\\Scripts\\\\python.exe -m pip install --upgrade pip && .venv-pyannote\\\\Scripts\\\\python.exe -m pip install pyannote.audio",
+    "benchmark:pyannote": ".venv-pyannote\\\\Scripts\\\\python.exe scripts\\\\pyannote_community_backend.py"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-dialog": "^2.0.0",
+    "@tauri-apps/plugin-fs": "^2.0.0",
+    "@tauri-apps/plugin-shell": "^2.0.0",
+    "@tauri-apps/plugin-sql": "^2.0.0",
+    "@tauri-apps/plugin-store": "^2.0.0",
+    "html2canvas": "^1.4.1",
+    "jspdf": "^2.5.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.0",
+    "zustand": "^4.5.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "autoprefixer": "^10.4.0",
+    "postcss": "^8.4.0",
+    "tailwindcss": "^3.4.0",
+    "typescript": "^5.5.0",
+    "vite": "^5.4.0"
+  }
+}

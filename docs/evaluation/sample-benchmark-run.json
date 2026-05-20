@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "engine": "local-dev",
+  "cases": [
+    {
+      "caseId": "sample-long-meeting",
+      "processingSec": 240,
+      "output": {
+        "speakers": ["SPEAKER_00", "SPEAKER_01", "SPEAKER_02", "SPEAKER_03"],
+        "summary": "The delivery schedule was approved and Ana will send the proposal.",
+        "topics": ["Schedule"],
+        "decisions": [
+          {
+            "title": "Approved delivery schedule",
+            "owner": "",
+            "timestampSec": 30,
+            "evidence": "The delivery schedule was approved."
+          }
+        ],
+        "actions": [
+          {
+            "task": "Ana will send the proposal",
+            "owner": "Ana",
+            "deadline": "",
+            "timestampSec": 60,
+            "evidence": "Ana agreed to send the proposal."
+          }
+        ],
+        "questions": [
+          "Who will validate the final spreadsheet?"
+        ],
+        "risks": []
+      }
+    }
+  ]
+}

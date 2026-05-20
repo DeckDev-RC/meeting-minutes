@@ -1,0 +1,36 @@
+[package]
+name = "meeting-minutes"
+version = "1.0.0"
+edition = "2021"
+default-run = "meeting-minutes"
+
+[lib]
+name = "meeting_minutes_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-store = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["multipart", "json", "stream"] }
+tokio = { version = "1", features = ["full"] }
+bytes = "1"
+futures = "0.3"
+aho-corasick = "1"
+rand = "0.8"
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+rusqlite = { version = "0.31", features = ["bundled"] }
+sherpa-onnx = "1.13.2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
