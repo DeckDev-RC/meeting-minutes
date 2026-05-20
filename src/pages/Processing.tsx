@@ -4,8 +4,6 @@ import { useParams, useNavigate } from "react-router-dom";
 import ProgressPipeline from "../components/ProgressPipeline";
 import { useMeetingStore } from "../store/meetingStore";
 import {
-  extractAudio,
-  createSmartChunks,
   alignSpeakerTurnsToTranscription,
   diarizeAudioTurnsModernCpu,
   diarizeAudioTurnsModernCpuChunked,
@@ -15,6 +13,7 @@ import {
   generateAtaFromFactsStreaming,
   getProcessingChunks,
   getApiKeys,
+  prepareAudioAndChunks,
   probeMediaMetadata,
   saveTranscription,
   saveMinutes,
@@ -43,6 +42,7 @@ import {
   type LiveProcessingState,
   type LiveTab,
 } from "../lib/liveProcessing";
+import { collectExpiredLiveProcessingSnapshotIds } from "../lib/liveProcessingCache";
 import type {
   ExportedChunk,
   MeetingChunkInsights,
@@ -56,8 +56,14 @@ const activeProcessingRuns = new Map<string, Promise<void>>();
 const pendingProcessingStartTimers = new Map<string, ReturnType<typeof window.setTimeout>>();
 const liveProcessingSnapshots = new Map<string, LiveProcessingState>();
 const liveProcessingPublishers = new Map<string, (state: LiveProcessingState) => void>();
+const liveProcessingPublishTimers = new Map<string, ReturnType<typeof window.setTimeout>>();
+const liveProcessingLastPublishedAt = new Map<string, number>();
+const completedProcessingSnapshots = new Map<string, number>();
 const minutesStreamRawSnapshots = new Map<string, string>();
 let visibleProcessingMeetingId: string | null = null;
+
+const LIVE_STATE_PUBLISH_INTERVAL_MS = 160;
+const COMPLETED_SNAPSHOT_TTL_MS = 10 * 60 * 1000;
 
 type MinutesStreamPayload = {
   meetingId: string;
@@ -78,6 +84,70 @@ const getParentDir = (path: string) => {
 const joinPath = (dir: string, fileName: string) => {
   const separator = dir.includes("\\") ? "\\" : "/";
   return `${dir.replace(/[\\/]+$/, "")}${separator}${fileName}`;
+};
+
+const flushLiveStateSnapshot = (meetingId: string) => {
+  const timer = liveProcessingPublishTimers.get(meetingId);
+  if (timer) {
+    window.clearTimeout(timer);
+    liveProcessingPublishTimers.delete(meetingId);
+  }
+  const publish = liveProcessingPublishers.get(meetingId);
+  const snapshot = liveProcessingSnapshots.get(meetingId);
+  if (visibleProcessingMeetingId === meetingId && publish && snapshot) {
+    liveProcessingLastPublishedAt.set(meetingId, Date.now());
+    publish(snapshot);
+  }
+};
+
+const scheduleLiveStatePublish = (meetingId: string) => {
+  if (visibleProcessingMeetingId !== meetingId || !liveProcessingPublishers.has(meetingId)) {
+    return;
+  }
+  const now = Date.now();
+  const lastPublishedAt = liveProcessingLastPublishedAt.get(meetingId) ?? 0;
+  const waitMs = LIVE_STATE_PUBLISH_INTERVAL_MS - (now - lastPublishedAt);
+
+  if (waitMs <= 0) {
+    flushLiveStateSnapshot(meetingId);
+    return;
+  }
+
+  if (!liveProcessingPublishTimers.has(meetingId)) {
+    const timer = window.setTimeout(() => {
+      liveProcessingPublishTimers.delete(meetingId);
+      flushLiveStateSnapshot(meetingId);
+    }, waitMs);
+    liveProcessingPublishTimers.set(meetingId, timer);
+  }
+};
+
+const cleanupCompletedLiveProcessingSnapshots = () => {
+  const expiredIds = collectExpiredLiveProcessingSnapshotIds({
+    completedAtByMeetingId: completedProcessingSnapshots,
+    activeMeetingIds: new Set(activeProcessingRuns.keys()),
+    visibleMeetingId: visibleProcessingMeetingId,
+    nowMs: Date.now(),
+    ttlMs: COMPLETED_SNAPSHOT_TTL_MS,
+  });
+
+  for (const meetingId of expiredIds) {
+    const timer = liveProcessingPublishTimers.get(meetingId);
+    if (timer) {
+      window.clearTimeout(timer);
+      liveProcessingPublishTimers.delete(meetingId);
+    }
+    liveProcessingSnapshots.delete(meetingId);
+    minutesStreamRawSnapshots.delete(meetingId);
+    completedProcessingSnapshots.delete(meetingId);
+    liveProcessingLastPublishedAt.delete(meetingId);
+  }
+};
+
+const markProcessingSnapshotCompleted = (meetingId: string) => {
+  completedProcessingSnapshots.set(meetingId, Date.now());
+  flushLiveStateSnapshot(meetingId);
+  cleanupCompletedLiveProcessingSnapshots();
 };
 
 const transcriptionConcurrencyForProfile = (profile: ProcessingProfile) => {
@@ -358,10 +428,8 @@ export default function Processing() {
     const current = liveProcessingSnapshots.get(meetingId) ?? createLiveProcessingState();
     const next = updater(current);
     liveProcessingSnapshots.set(meetingId, next);
-    const publish = liveProcessingPublishers.get(meetingId);
-    if (visibleProcessingMeetingId === meetingId && publish) {
-      publish(next);
-    }
+    completedProcessingSnapshots.delete(meetingId);
+    scheduleLiveStatePublish(meetingId);
   };
 
   const addLiveLog = (meetingId: string, level: LiveLogLevel, message: string) => {
@@ -477,6 +545,7 @@ export default function Processing() {
     liveProcessingSnapshots.set(id, snapshot);
     liveProcessingPublishers.set(id, setLiveState);
     setLiveState(snapshot);
+    liveProcessingLastPublishedAt.set(id, Date.now());
     transcriptAutoScrollRef.current = true;
     setLiveTab("transcript");
     minutesStreamRawRef.current = minutesStreamRawSnapshots.get(id) ?? "";
@@ -511,6 +580,7 @@ export default function Processing() {
 
         const run = runPipeline(id).finally(() => {
           activeProcessingRuns.delete(id);
+          cleanupCompletedLiveProcessingSnapshots();
         });
         activeProcessingRuns.set(id, run);
       }, 50);
@@ -530,6 +600,11 @@ export default function Processing() {
       if (minutesStreamRenderTimerRef.current) {
         window.clearTimeout(minutesStreamRenderTimerRef.current);
         minutesStreamRenderTimerRef.current = null;
+      }
+      const livePublishTimer = liveProcessingPublishTimers.get(id);
+      if (livePublishTimer) {
+        window.clearTimeout(livePublishTimer);
+        liveProcessingPublishTimers.delete(id);
       }
       disposed = true;
       unlistenStream?.();
@@ -557,9 +632,11 @@ export default function Processing() {
       }
       const freshLiveState = createLiveProcessingState();
       liveProcessingSnapshots.set(meetingId, freshLiveState);
+      completedProcessingSnapshots.delete(meetingId);
       minutesStreamRawSnapshots.set(meetingId, "");
       minutesStreamRawRef.current = "";
       setLiveState(freshLiveState);
+      liveProcessingLastPublishedAt.set(meetingId, Date.now());
       transcriptAutoScrollRef.current = true;
       setLiveTab("transcript");
       setCurrentMeeting(meetingId);
@@ -629,12 +706,13 @@ export default function Processing() {
       if (storedChunks.length === 0) {
         addLiveLog(meetingId, "info", "Extraindo audio e detectando pausas.");
         updatePipelineProgress("detect_speech", 0, 0, 0, 0);
-        durationSec = await extractAudio(meeting.filePath, audioOutput);
-        updatePipelineProgress("detect_speech", 0, durationSec, 0, 0);
-        updatePipelineProgress("create_chunks", 0, durationSec, 0, 0);
         const chunkDir = joinPath(sourceDir, `${meetingId}_chunks`);
-        addLiveLog(meetingId, "info", "Criando chunks inteligentes para transcricao.");
-        const exportedChunks = await createSmartChunks(audioOutput, chunkDir, durationSec, {
+        addLiveLog(
+          meetingId,
+          "info",
+          "Preparando audio normalizado e chunks inteligentes em paralelo.",
+        );
+        const prepared = await prepareAudioAndChunks(meeting.filePath, audioOutput, chunkDir, {
           targetSec: 360,
           minSec: 180,
           maxSec: 480,
@@ -643,7 +721,10 @@ export default function Processing() {
           silenceNoiseDb: -35,
           outputFormat: "flac",
         });
-        await saveProcessingChunks(meetingId, exportedChunks);
+        durationSec = prepared.durationSec;
+        updatePipelineProgress("detect_speech", 0, durationSec, 0, 0);
+        updatePipelineProgress("create_chunks", 0, durationSec, 0, 0);
+        await saveProcessingChunks(meetingId, prepared.chunks);
         storedChunks = await getProcessingChunks(meetingId);
         durationSec = sumChunkDurations(storedChunks);
         addLiveLog(meetingId, "success", `${storedChunks.length} chunks criados.`);
@@ -1086,6 +1167,7 @@ export default function Processing() {
       if (visibleProcessingMeetingId === meetingId) {
         navigate(`/minutes/${meetingId}`);
       }
+      markProcessingSnapshotCompleted(meetingId);
     } catch (err) {
       console.error("Processing pipeline failed:", err);
       const step = useMeetingStore.getState().currentStep;
@@ -1093,6 +1175,7 @@ export default function Processing() {
       addLiveLog(meetingId, "error", formatError(err) || "Erro desconhecido no processamento.");
       setError(formatError(err) || "Erro desconhecido");
       if (id) await updateMeetingStatus(id, "error").catch(() => {});
+      markProcessingSnapshotCompleted(meetingId);
     }
   };
 

@@ -13,6 +13,7 @@
     "tauri": "tauri",
     "eval:meeting": "node scripts/evaluateMeetingRun.mjs",
     "benchmark:text": "node scripts/runTextBenchmark.mjs",
+    "benchmark:audio-prepare": "cargo run --manifest-path src-tauri/Cargo.toml --bin audio_prepare_benchmark --",
     "benchmark:chunks": "cargo run --manifest-path src-tauri/Cargo.toml --bin chunk_export_benchmark --",
     "setup:diarize-cpu": "python -m venv .venv-diarize && .venv-diarize\\\\Scripts\\\\python.exe -m pip install --upgrade pip && .venv-diarize\\\\Scripts\\\\python.exe -m pip install diarize==0.1.2",
     "benchmark:diarize-cpu": ".venv-diarize\\\\Scripts\\\\python.exe scripts\\\\diarize_cpu_backend.py",

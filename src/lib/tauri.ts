@@ -26,6 +26,19 @@ const invoke = <T>(command: string, args?: Record<string, unknown>) => {
 export const extractAudio = (inputPath: string, outputPath: string) =>
   invoke<number>('extract_audio', { inputPath, outputPath });
 
+export const prepareAudioAndChunks = (
+  inputPath: string,
+  audioOutputPath: string,
+  chunkOutputDir: string,
+  options?: SmartChunkOptions
+) =>
+  invoke<{ durationSec: number; chunks: ExportedChunk[] }>('prepare_audio_and_chunks', {
+    inputPath,
+    audioOutputPath,
+    chunkOutputDir,
+    options,
+  });
+
 export const probeMediaMetadata = (inputPath: string) =>
   invoke<MeetingMetadata>('probe_media_metadata', { inputPath });
 

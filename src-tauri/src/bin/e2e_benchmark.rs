@@ -655,7 +655,7 @@ async fn main() -> Result<(), String> {
                         }
                         if let Ok(local_refined) = diarize_audio_with_modern_cpu(
                             window_chunk.audio_path.clone(),
-                            window_segments,
+                            &window_segments,
                             local_expected_speakers,
                         )
                         .await

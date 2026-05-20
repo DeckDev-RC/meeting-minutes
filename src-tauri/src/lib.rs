@@ -72,6 +72,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::audio::extract_audio,
+            commands::audio::prepare_audio_and_chunks,
             commands::audio::probe_media_metadata,
             commands::audio::chunk_audio,
             commands::audio::detect_silences,

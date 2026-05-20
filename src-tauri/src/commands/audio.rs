@@ -1,4 +1,6 @@
-use crate::models::audio::{ChunkPlan, ExportedChunk, SilenceRange, SmartChunkOptions};
+use crate::models::audio::{
+    ChunkPlan, ExportedChunk, PreparedAudio, SilenceRange, SmartChunkOptions,
+};
 use crate::models::meeting::MeetingMetadata;
 use chrono::{DateTime, Utc};
 use futures::stream::{self, StreamExt};
@@ -272,6 +274,31 @@ pub fn validate_chunk_output_format(format: &str) -> Result<String, String> {
     }
 }
 
+pub fn build_extract_audio_args(
+    input_path: &Path,
+    output_path: &Path,
+    output_format: &str,
+    audio_filter: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec![
+        "-i".to_string(),
+        input_path.to_string_lossy().to_string(),
+        "-vn".to_string(),
+    ];
+    if let Some(filter) = audio_filter.filter(|value| !value.trim().is_empty()) {
+        args.extend(["-af".to_string(), filter.to_string()]);
+    }
+    args.extend([
+        "-ar".to_string(),
+        "16000".to_string(),
+        "-ac".to_string(),
+        "1".to_string(),
+    ]);
+    args.extend(audio_codec_args(output_format));
+    args.extend(["-y".to_string(), output_path.to_string_lossy().to_string()]);
+    args
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SmartChunkExportStrategy {
     SegmentMuxerCopy,
@@ -431,6 +458,43 @@ pub fn build_smart_chunk_export_args(
         }
         SmartChunkExportStrategy::ParallelPerChunk => Vec::new(),
     }
+}
+
+async fn run_extract_audio(
+    app: tauri::AppHandle,
+    input_path: String,
+    output_path: String,
+    audio_filter: Option<String>,
+) -> Result<String, String> {
+    let extension = Path::new(&output_path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("flac")
+        .to_ascii_lowercase();
+    let args = build_extract_audio_args(
+        Path::new(&input_path),
+        Path::new(&output_path),
+        &extension,
+        audio_filter.as_deref(),
+    );
+
+    let output = app
+        .shell()
+        .sidecar("ffmpeg")
+        .map_err(|e| e.to_string())?
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if output.status.code() != Some(0) {
+        return Err(command_output_error(
+            "Falha ao extrair audio com ffmpeg",
+            &output,
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stderr).to_string())
 }
 
 fn parse_hms_duration(value: &str) -> Option<f64> {
@@ -635,48 +699,18 @@ pub async fn extract_audio(
     input_path: String,
     output_path: String,
 ) -> Result<f64, String> {
-    let extension = Path::new(&output_path)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("flac")
-        .to_ascii_lowercase();
-
     let defaults = SmartChunkOptions::default();
     let silence_filter = format!(
         "silencedetect=noise={}dB:d={}",
         defaults.silence_noise_db, defaults.silence_min_duration_sec
     );
-    let mut args = vec![
-        "-i".to_string(),
+    let stderr = run_extract_audio(
+        app.clone(),
         input_path,
-        "-vn".to_string(),
-        "-af".to_string(),
-        silence_filter,
-        "-ar".to_string(),
-        "16000".to_string(),
-        "-ac".to_string(),
-        "1".to_string(),
-    ];
-    args.extend(audio_codec_args(&extension));
-    args.extend(["-y".to_string(), output_path.clone()]);
-
-    let output = app
-        .shell()
-        .sidecar("ffmpeg")
-        .map_err(|e| e.to_string())?
-        .args(args)
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if output.status.code() != Some(0) {
-        return Err(command_output_error(
-            "Falha ao extrair audio com ffmpeg",
-            &output,
-        ));
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
+        output_path.clone(),
+        Some(silence_filter),
+    )
+    .await?;
     let silences = parse_silencedetect(&stderr);
     write_silence_cache(
         &output_path,
@@ -836,6 +870,88 @@ pub async fn create_smart_chunks(
                 })
         }
     }
+}
+
+#[command]
+pub async fn prepare_audio_and_chunks(
+    app: tauri::AppHandle,
+    input_path: String,
+    audio_output_path: String,
+    chunk_output_dir: String,
+    options: Option<SmartChunkOptions>,
+) -> Result<PreparedAudio, String> {
+    let opts = options.unwrap_or_default();
+    fs::create_dir_all(&chunk_output_dir).map_err(|e| e.to_string())?;
+    if let Some(parent) = Path::new(&audio_output_path).parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    let normalize_future = run_extract_audio(
+        app.clone(),
+        input_path.clone(),
+        audio_output_path.clone(),
+        None,
+    );
+
+    let chunk_future = async {
+        let duration_future = get_duration(&app, &input_path);
+        let silence_future = detect_silences(
+            app.clone(),
+            input_path.clone(),
+            opts.silence_noise_db,
+            opts.silence_min_duration_sec,
+        );
+        let (duration, silences) = tokio::join!(duration_future, silence_future);
+        let duration = duration?;
+        let silences = silences.unwrap_or_default();
+        write_silence_cache(
+            &audio_output_path,
+            opts.silence_noise_db,
+            opts.silence_min_duration_sec,
+            silences.clone(),
+        )
+        .await;
+
+        let plans = plan_smart_chunks(
+            duration,
+            &silences,
+            opts.target_sec,
+            opts.min_sec,
+            opts.max_sec,
+            opts.overlap_sec,
+        );
+        let output_format = validate_chunk_output_format(&opts.output_format)?;
+        let chunks = match export_smart_chunks_batch(
+            app.clone(),
+            &input_path,
+            &chunk_output_dir,
+            &output_format,
+            &plans,
+        )
+        .await
+        {
+            Ok(exported) => exported,
+            Err(_) => {
+                export_smart_chunks_parallel(
+                    app.clone(),
+                    input_path.clone(),
+                    chunk_output_dir.clone(),
+                    output_format,
+                    plans,
+                )
+                .await?
+            }
+        };
+
+        Ok::<PreparedAudio, String>(PreparedAudio {
+            duration_sec: duration,
+            chunks,
+        })
+    };
+
+    let (normalize_result, prepared_result) = tokio::join!(normalize_future, chunk_future);
+    normalize_result?;
+    prepared_result
 }
 
 async fn export_smart_chunks_batch(
@@ -1084,6 +1200,21 @@ mod tests {
 
         let err = validate_chunk_output_format("../bad").unwrap_err();
         assert!(err.contains("Formato de audio invalido"));
+    }
+
+    #[test]
+    fn normalized_audio_args_can_skip_silence_detection_for_parallel_prepare() {
+        let args = build_extract_audio_args(
+            Path::new("meeting.mp4"),
+            Path::new("meeting.wav"),
+            "wav",
+            None,
+        );
+
+        assert!(args.windows(2).any(|pair| pair == ["-vn", "-ar"]));
+        assert!(!args.iter().any(|arg| arg.contains("silencedetect")));
+        assert!(args.iter().any(|arg| arg == "meeting.mp4"));
+        assert!(args.iter().any(|arg| arg == "meeting.wav"));
     }
 
     #[test]

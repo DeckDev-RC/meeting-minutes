@@ -82,6 +82,51 @@ const capTail = <T>(items: T[], maxItems: number) => {
   return items.length > maxItems ? items.slice(items.length - maxItems) : items;
 };
 
+const mergeSortedByStart = <T extends { start: number }>(left: T[], right: T[]) => {
+  const merged: T[] = [];
+  let leftIndex = 0;
+  let rightIndex = 0;
+
+  while (leftIndex < left.length || rightIndex < right.length) {
+    const leftItem = left[leftIndex];
+    const rightItem = right[rightIndex];
+    if (rightItem === undefined || (leftItem !== undefined && leftItem.start <= rightItem.start)) {
+      merged.push(leftItem);
+      leftIndex += 1;
+    } else {
+      merged.push(rightItem);
+      rightIndex += 1;
+    }
+  }
+
+  return merged;
+};
+
+const upsertSortedInsight = (
+  insights: LiveInsightItem[],
+  nextInsight: LiveInsightItem,
+) => {
+  const merged: LiveInsightItem[] = [];
+  let inserted = false;
+
+  for (const insight of insights) {
+    if (insight.chunkIndex === nextInsight.chunkIndex) {
+      continue;
+    }
+    if (!inserted && nextInsight.startSec <= insight.startSec) {
+      merged.push(nextInsight);
+      inserted = true;
+    }
+    merged.push(insight);
+  }
+
+  if (!inserted) {
+    merged.push(nextInsight);
+  }
+
+  return merged;
+};
+
 const cleanText = (value: string) => value.replace(/\s+/g, " ").trim();
 
 const shouldMergeTranscriptSegment = (
@@ -144,10 +189,7 @@ export const appendLiveTranscript = (
 ): LiveProcessingState => {
   const additions = buildReadableTranscriptBlocks(chunkIndex, segments);
 
-  const transcript = capTail(
-    [...state.transcript, ...additions].sort((a, b) => a.start - b.start),
-    maxItems,
-  );
+  const transcript = capTail(mergeSortedByStart(state.transcript, additions), maxItems);
 
   return { ...state, transcript };
 };
@@ -164,14 +206,20 @@ export const applyLiveTranscriptSpeakers = (
   diarizedSegments: DiarizedSegment[],
 ): LiveProcessingState => {
   if (diarizedSegments.length === 0 || state.transcript.length === 0) return state;
+  const sortedSegments = [...diarizedSegments].sort((a, b) => a.start - b.start);
+  let cursor = 0;
 
   const transcript = state.transcript.map((item) => {
     let bestSpeaker = "";
     let bestOverlap = 0;
 
-    for (const segment of diarizedSegments) {
-      if (segment.end < item.start) continue;
-      if (segment.start > item.end) continue;
+    while (cursor < sortedSegments.length && sortedSegments[cursor].end < item.start) {
+      cursor += 1;
+    }
+
+    for (let index = cursor; index < sortedSegments.length; index += 1) {
+      const segment = sortedSegments[index];
+      if (segment.start > item.end) break;
       const overlap = overlapSeconds(item.start, item.end, segment.start, segment.end);
       if (overlap > bestOverlap) {
         bestOverlap = overlap;
@@ -208,11 +256,7 @@ export const appendLiveInsights = (
     risks: insights.risks.map(cleanText).filter(Boolean),
   };
 
-  const withoutPrevious = state.insights.filter((item) => item.chunkIndex !== insights.chunkIndex);
-  const insightsList = capTail(
-    [...withoutPrevious, nextInsight].sort((a, b) => a.startSec - b.startSec),
-    maxItems,
-  );
+  const insightsList = capTail(upsertSortedInsight(state.insights, nextInsight), maxItems);
 
   return {
     ...state,

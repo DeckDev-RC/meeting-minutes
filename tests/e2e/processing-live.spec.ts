@@ -101,6 +101,7 @@ async function installTauriMock(page: Page) {
             recordedAt: "2026-05-20T12:00:00Z",
           };
         }
+        if (command === "prepare_audio_and_chunks") return { durationSec: 240, chunks };
         if (command === "extract_audio") return 240;
         if (command === "create_smart_chunks") return chunks;
         if (command === "save_processing_chunks") {

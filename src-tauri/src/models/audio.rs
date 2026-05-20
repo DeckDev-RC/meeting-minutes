@@ -27,6 +27,13 @@ pub struct ExportedChunk {
     pub duration_sec: f64,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedAudio {
+    pub duration_sec: f64,
+    pub chunks: Vec<ExportedChunk>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SmartChunkOptions {
