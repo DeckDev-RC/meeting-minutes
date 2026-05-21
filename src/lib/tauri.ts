@@ -259,6 +259,9 @@ export const savePdf = (pdfBytes: number[], suggestedName: string) =>
 export const saveBenchmarkRun = (path: string, content: string) =>
   invoke<string>('save_benchmark_run', { path, content });
 
+export const resolveProcessingWorkDir = (meetingId: string) =>
+  invoke<string>('resolve_processing_work_dir', { meetingId });
+
 export const openFolder = (path: string) =>
   invoke<void>('open_folder', { path });
 

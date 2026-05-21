@@ -20,6 +20,7 @@ import {
   saveMinutes,
   saveProcessingChunks,
   saveBenchmarkRun,
+  resolveProcessingWorkDir,
   transcribeChunk,
   updateProcessingChunkFacts,
   updateProcessingChunkResult,
@@ -89,11 +90,6 @@ type FactQueueItem = {
   chunk: ProcessingChunkRecord;
   segments: TranscriptionSegment[];
   segmentsJson: string;
-};
-
-const getParentDir = (path: string) => {
-  const lastSeparator = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
-  return lastSeparator >= 0 ? path.slice(0, lastSeparator) : ".";
 };
 
 const joinPath = (dir: string, fileName: string) => {
@@ -756,19 +752,19 @@ export default function Processing() {
       // Step 1: Extract audio and create/resume smart chunks.
       setStep("extract_audio");
       setStepStatus("extract_audio", "running");
-      const sourceDir = getParentDir(meeting.filePath);
-      const audioOutput = joinPath(sourceDir, `${meetingId}_audio.wav`);
+      const processingWorkDir = await resolveProcessingWorkDir(meetingId);
+      const audioOutput = joinPath(processingWorkDir, `${meetingId}_audio.wav`);
       let storedChunks = await getProcessingChunks(meetingId);
       let durationSec = sumChunkDurations(storedChunks);
 
       if (storedChunks.length === 0) {
         addLiveLog(meetingId, "info", "Extraindo audio e detectando pausas.");
         updatePipelineProgress("detect_speech", 0, 0, 0, 0);
-        const chunkDir = joinPath(sourceDir, `${meetingId}_chunks`);
+        const chunkDir = joinPath(processingWorkDir, "chunks");
         addLiveLog(
           meetingId,
           "info",
-          "Preparando audio normalizado e chunks inteligentes em paralelo.",
+          "Preparando audio normalizado e chunks inteligentes em workspace local.",
         );
         const prepared = await prepareAudioAndChunks(meeting.filePath, audioOutput, chunkDir, {
           targetSec: 360,

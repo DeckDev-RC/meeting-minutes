@@ -257,6 +257,43 @@ Run `ami-es2002a-adaptive-centroid-reuse` de 2026-05-21:
 | extract_facts_parallel | 61.84s |
 | generate_minutes | 16.82s |
 
+## Benchmark E2E reuniao real `2026-05-08 15-48-29`
+
+Arquivo:
+
+```text
+G:\Drives compartilhados\Drive Dev's\Anotações_Equipe\Marcos Paulo\Reunião\2026-05-08 15-48-29.mp4
+```
+
+O run `d34b0ff3-9a83-466a-a71f-203b96fbbd7c` salvo pelo app em 2026-05-21 levou `856.70s` para `992.93s` de audio. A investigacao no SQLite local mostrou que a reuniao foi criada em `2026-05-21T20:50:27Z`, mas os chunks so foram persistidos em `2026-05-21T21:01:19Z`; portanto o gargalo estava antes da transcricao, na preparacao de audio/chunks. A causa pratica era escrever `_audio.wav`, cache de silencio e `_chunks` diretamente no Google Drive compartilhado.
+
+Depois de medir o mesmo arquivo com intermediarios locais:
+
+```powershell
+cargo run --manifest-path src-tauri\Cargo.toml --bin e2e_benchmark -- --input "G:\Drives compartilhados\Drive Dev's\Anotações_Equipe\Marcos Paulo\Reunião\2026-05-08 15-48-29.mp4" --id real-2026-05-08-154829-current --out-dir "c:\C\pop\meeting-minutes\benchmarks\runs\real-2026-05-08-154829-current" --source "Reunião Marcos Paulo 2026-05-08 15-48-29" --expected-speakers 2 --diarization-mode auto --transcribe-concurrency 3 --facts-concurrency 2
+```
+
+Resultado:
+
+| Pipeline | Tempo E2E | RTF | Velocidade | Falantes | Observacao |
+| --- | ---: | ---: | ---: | ---: | --- |
+| app antigo em Drive compartilhado | 856.70s | 0.863 | 1.16x | 2 | gargalo na preparacao de audio/chunks em `G:\` |
+| runner E2E com intermediarios locais | 94.17s | 0.095 | 10.48x | 2 | `modern-cpu`, 3 chunks |
+| runner E2E com concorrencia balanced | 97.12s | 0.098 | 10.16x | 2 | transcricao 4, fatos 3 |
+
+Tempos do run local `real-2026-05-08-154829-current`:
+
+| Etapa | Tempo |
+| --- | ---: |
+| extract_audio | 1.60s |
+| create_smart_chunks | 0.64s |
+| transcribe | 4.05s |
+| diarize_speculative | 73.23s |
+| extract_facts_parallel | 69.18s |
+| generate_minutes | 18.70s |
+
+Conclusao: para essa reuniao, a otimizacao de maior impacto e manter WAV/chunks/cache em workspace local e salvar no Drive apenas os artefatos finais. Depois disso, o gargalo real passa a ser `max(diarize_speculative, extract_facts_parallel)` mais a geracao final.
+
 Conclusao pratica:
 
 - A segunda passada seletiva nao deve usar Sherpa no caminho rapido: no AMI `ES2002a`, mesmo uma tentativa seletiva custou `445.82s` E2E.

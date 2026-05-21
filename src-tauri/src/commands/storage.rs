@@ -1,7 +1,34 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tauri::command;
+use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
+
+fn safe_path_component(value: &str) -> String {
+    let sanitized = value
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+
+    if sanitized.is_empty() {
+        "meeting".to_string()
+    } else {
+        sanitized
+    }
+}
+
+pub fn processing_work_dir_path(app_data_dir: &Path, meeting_id: &str) -> PathBuf {
+    app_data_dir
+        .join("processing")
+        .join(safe_path_component(meeting_id))
+}
 
 fn write_text_file(path: &Path, content: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
@@ -65,6 +92,20 @@ pub async fn open_folder(path: String) -> Result<(), String> {
 }
 
 #[command]
+pub async fn resolve_processing_work_dir(
+    app: tauri::AppHandle,
+    meeting_id: String,
+) -> Result<String, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app data directory: {e}"))?;
+    let path = processing_work_dir_path(&app_data_dir, &meeting_id);
+    fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[command]
 pub async fn save_benchmark_run(path: String, content: String) -> Result<String, String> {
     let path = Path::new(&path);
     write_text_file(path, &content)?;
@@ -74,6 +115,25 @@ pub async fn save_benchmark_run(path: String, content: String) -> Result<String,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn processing_work_dir_stays_under_app_data_and_sanitizes_id() {
+        let app_data_dir = std::env::temp_dir().join("meeting-minutes-app-data");
+
+        let path = processing_work_dir_path(&app_data_dir, r"..\shared/meeting:1");
+
+        assert_eq!(path.parent().unwrap(), app_data_dir.join("processing"));
+        assert_eq!(path.file_name().unwrap(), "___shared_meeting_1");
+    }
+
+    #[test]
+    fn processing_work_dir_uses_placeholder_for_empty_id() {
+        let app_data_dir = std::env::temp_dir().join("meeting-minutes-app-data");
+
+        let path = processing_work_dir_path(&app_data_dir, "   ");
+
+        assert_eq!(path.file_name().unwrap(), "meeting");
+    }
 
     #[test]
     fn write_text_file_creates_parent_directories_and_file() {
