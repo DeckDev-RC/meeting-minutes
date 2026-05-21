@@ -16,6 +16,22 @@ use tauri_plugin_shell::ShellExt;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+fn hide_command_window(command: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = command;
+    }
+}
+
 const QUICK_MERGE_GAP_SEC: f64 = 1.25;
 const QUICK_ANSWER_WINDOW_SEC: f64 = 4.0;
 const SEGMENTATION_MODEL_URL: &str = "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.int8.onnx";
@@ -655,6 +671,7 @@ async fn run_modern_cpu_backend(
 
     tokio::task::spawn_blocking(move || {
         let mut command = Command::new(&backend.python_exe);
+        hide_command_window(&mut command);
         command
             .arg(&backend.script_path)
             .arg("--audio")
@@ -698,7 +715,9 @@ fn resolve_hf_token() -> Option<String> {
 
     #[cfg(target_os = "windows")]
     {
-        let output = Command::new("powershell")
+        let mut command = Command::new("powershell");
+        hide_command_window(&mut command);
+        let output = command
             .arg("-NoProfile")
             .arg("-Command")
             .arg("[Environment]::GetEnvironmentVariable('HF_TOKEN','User')")
@@ -733,6 +752,7 @@ async fn run_pyannote_backend(
 
     tokio::task::spawn_blocking(move || {
         let mut command = Command::new(&backend.python_exe);
+        hide_command_window(&mut command);
         command
             .env("HF_TOKEN", hf_token)
             .arg(&backend.script_path)
