@@ -32,7 +32,7 @@ import { transcribeChunksConcurrently } from "../lib/transcriptionQueue";
 import { mergeSortedTranscriptionSegments } from "../lib/segmentMerge";
 import { resolveSegmentsForFactScheduling } from "../lib/processingChunks";
 import { buildAdaptiveFactBatches, type FactBatchItem } from "../lib/meetingFactsQueue";
-import { buildBenchmarkRun, buildBenchmarkRunPath } from "../lib/benchmarkRun";
+import { buildBenchmarkRun, buildBenchmarkRunArtifactPath } from "../lib/benchmarkRun";
 import { derivePipelineProgress, type PipelinePhase } from "../lib/pipelineProgress";
 import {
   factConcurrencyForPhase,
@@ -1333,7 +1333,7 @@ export default function Processing() {
         facts: meetingFacts,
         mediaMetadata: meetingMetadata,
       });
-      const benchmarkRunPath = buildBenchmarkRunPath(meeting.filePath, meetingId);
+      const benchmarkRunPath = buildBenchmarkRunArtifactPath(processingWorkDir, meetingId);
       await saveBenchmarkRun(benchmarkRunPath, JSON.stringify(benchmarkRun, null, 2));
 
       await updateMeetingStatus(meetingId, "done");

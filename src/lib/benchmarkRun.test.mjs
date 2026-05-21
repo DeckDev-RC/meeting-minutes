@@ -39,6 +39,7 @@ assert.equal(compile.status, 0, compile.stdout + compile.stderr);
 
 const {
   buildBenchmarkRun,
+  buildBenchmarkRunArtifactPath,
   buildBenchmarkRunFileName,
   buildBenchmarkRunPath,
 } = require(join(outDir, "benchmarkRun.js"));
@@ -119,4 +120,11 @@ assert.equal(
 assert.equal(
   buildBenchmarkRunPath("/tmp/produto.mp3", "meeting-123"),
   "/tmp/meeting-123_benchmark-run.json",
+);
+assert.equal(
+  buildBenchmarkRunArtifactPath(
+    "C:\\Users\\User\\AppData\\Roaming\\com.agregar.meeting-minutes\\processing\\meeting-123\\",
+    "meeting-123",
+  ),
+  "C:\\Users\\User\\AppData\\Roaming\\com.agregar.meeting-minutes\\processing\\meeting-123\\meeting-123_benchmark-run.json",
 );

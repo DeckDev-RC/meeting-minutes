@@ -66,6 +66,11 @@ export function buildBenchmarkRunFileName(meetingId: string): string {
   return `${meetingId}_benchmark-run.json`;
 }
 
+export function buildBenchmarkRunArtifactPath(outputDir: string, meetingId: string): string {
+  const separator = outputDir.includes("\\") ? "\\" : "/";
+  return `${outputDir.replace(/[\\/]+$/, "")}${separator}${buildBenchmarkRunFileName(meetingId)}`;
+}
+
 export function buildBenchmarkRunPath(sourcePath: string, meetingId: string): string {
   const lastSeparator = Math.max(sourcePath.lastIndexOf("\\"), sourcePath.lastIndexOf("/"));
   const dir = lastSeparator >= 0 ? sourcePath.slice(0, lastSeparator) : ".";
