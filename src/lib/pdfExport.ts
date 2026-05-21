@@ -1,8 +1,9 @@
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
-import { planPdfPageSlices } from './pdfLayout';
+import { choosePdfRenderStrategy, planPdfPageSlices, type PdfPageSlice } from './pdfLayout';
 
 const EXPORT_WIDTH_PX = 794;
+const PDF_CANVAS_SCALE = 2;
 
 function createExportSurface(minutesHtmlElement: HTMLElement) {
   const host = document.createElement('div');
@@ -82,6 +83,70 @@ function addPageFooter(pdf: jsPDF, pageNumber: number, pageCount: number, title:
   });
 }
 
+function addCanvasPage(
+  pdf: jsPDF,
+  canvas: HTMLCanvasElement,
+  pageIndex: number,
+  pageCount: number,
+  title: string,
+  margin: number,
+  pageContentHeight: number,
+  pageHeight: number,
+  contentWidth: number,
+  outputHeightMm: number,
+) {
+  if (pageIndex > 0) pdf.addPage();
+  pdf.addImage(
+    canvas,
+    'PNG',
+    margin,
+    margin,
+    contentWidth,
+    outputHeightMm,
+    undefined,
+    'FAST',
+  );
+  pdf.setFillColor(255, 255, 255);
+  pdf.rect(0, margin + pageContentHeight, 210, pageHeight - margin - pageContentHeight, 'F');
+  addPageFooter(pdf, pageIndex + 1, pageCount, title);
+}
+
+function sliceCanvasPage(
+  fullCanvas: HTMLCanvasElement,
+  page: PdfPageSlice,
+): HTMLCanvasElement {
+  const scale = fullCanvas.width / EXPORT_WIDTH_PX;
+  const sourceY = Math.min(
+    Math.max(0, Math.floor(page.sourceY * scale)),
+    Math.max(0, fullCanvas.height - 1),
+  );
+  const sourceHeight = Math.max(
+    1,
+    Math.min(Math.ceil(page.sourceHeight * scale), fullCanvas.height - sourceY),
+  );
+  const canvas = document.createElement('canvas');
+  canvas.width = fullCanvas.width;
+  canvas.height = sourceHeight;
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('Nao foi possivel preparar pagina do PDF.');
+  }
+
+  context.drawImage(
+    fullCanvas,
+    0,
+    sourceY,
+    fullCanvas.width,
+    sourceHeight,
+    0,
+    0,
+    fullCanvas.width,
+    sourceHeight,
+  );
+
+  return canvas;
+}
+
 export async function exportToPDF(
   minutesHtmlElement: HTMLElement,
   title: string
@@ -117,36 +182,72 @@ export async function exportToPDF(
       pageContentHeightMm: pageContentHeight,
     });
 
-    for (let pageIndex = 0; pageIndex < pageSlices.length; pageIndex += 1) {
-      const page = pageSlices[pageIndex];
-      if (pageIndex > 0) pdf.addPage();
+    const renderStrategy = choosePdfRenderStrategy({
+      documentHeightPx,
+      exportWidthPx: EXPORT_WIDTH_PX,
+      scale: PDF_CANVAS_SCALE,
+      pageCount: pageSlices.length,
+    });
 
-      const canvas = await html2canvas(surface.host, {
-        scale: 2,
+    if (renderStrategy.mode === 'single-canvas') {
+      const fullCanvas = await html2canvas(surface.host, {
+        scale: PDF_CANVAS_SCALE,
         useCORS: true,
         backgroundColor: '#ffffff',
         width: EXPORT_WIDTH_PX,
-        height: page.sourceHeight,
+        height: documentHeightPx,
         windowWidth: EXPORT_WIDTH_PX,
-        windowHeight: page.sourceHeight,
+        windowHeight: documentHeightPx,
         scrollX: 0,
         scrollY: 0,
-        y: page.sourceY,
       });
 
-      pdf.addImage(
-        canvas,
-        'PNG',
-        margin,
-        margin,
-        contentWidth,
-        page.outputHeightMm,
-        undefined,
-        'FAST',
-      );
-      pdf.setFillColor(255, 255, 255);
-      pdf.rect(0, margin + pageContentHeight, pageWidth, pageHeight - margin - pageContentHeight, 'F');
-      addPageFooter(pdf, pageIndex + 1, pageSlices.length, title);
+      for (let pageIndex = 0; pageIndex < pageSlices.length; pageIndex += 1) {
+        const page = pageSlices[pageIndex];
+        const pageCanvas =
+          pageSlices.length === 1 ? fullCanvas : sliceCanvasPage(fullCanvas, page);
+        addCanvasPage(
+          pdf,
+          pageCanvas,
+          pageIndex,
+          pageSlices.length,
+          title,
+          margin,
+          pageContentHeight,
+          pageHeight,
+          contentWidth,
+          page.outputHeightMm,
+        );
+      }
+    } else {
+      for (let pageIndex = 0; pageIndex < pageSlices.length; pageIndex += 1) {
+        const page = pageSlices[pageIndex];
+        const canvas = await html2canvas(surface.host, {
+          scale: PDF_CANVAS_SCALE,
+          useCORS: true,
+          backgroundColor: '#ffffff',
+          width: EXPORT_WIDTH_PX,
+          height: page.sourceHeight,
+          windowWidth: EXPORT_WIDTH_PX,
+          windowHeight: page.sourceHeight,
+          scrollX: 0,
+          scrollY: 0,
+          y: page.sourceY,
+        });
+
+        addCanvasPage(
+          pdf,
+          canvas,
+          pageIndex,
+          pageSlices.length,
+          title,
+          margin,
+          pageContentHeight,
+          pageHeight,
+          contentWidth,
+          page.outputHeightMm,
+        );
+      }
     }
 
     const arrayBuffer = pdf.output('arraybuffer');

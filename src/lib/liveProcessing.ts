@@ -102,27 +102,38 @@ const mergeSortedByStart = <T extends { start: number }>(left: T[], right: T[]) 
   return merged;
 };
 
+const isSortedByStart = <T extends { start: number }>(items: T[]) => {
+  for (let index = 1; index < items.length; index += 1) {
+    if (items[index - 1].start > items[index].start) {
+      return false;
+    }
+  }
+
+  return true;
+};
+
 const upsertSortedInsight = (
   insights: LiveInsightItem[],
   nextInsight: LiveInsightItem,
 ) => {
-  const merged: LiveInsightItem[] = [];
-  let inserted = false;
-
-  for (const insight of insights) {
-    if (insight.chunkIndex === nextInsight.chunkIndex) {
-      continue;
-    }
-    if (!inserted && nextInsight.startSec <= insight.startSec) {
-      merged.push(nextInsight);
-      inserted = true;
-    }
-    merged.push(insight);
+  const merged = insights.slice();
+  const existingIndex = merged.findIndex((insight) => insight.chunkIndex === nextInsight.chunkIndex);
+  if (existingIndex >= 0) {
+    merged.splice(existingIndex, 1);
   }
 
-  if (!inserted) {
-    merged.push(nextInsight);
+  let low = 0;
+  let high = merged.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (merged[middle].startSec < nextInsight.startSec) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
   }
+
+  merged.splice(low, 0, nextInsight);
 
   return merged;
 };
@@ -144,13 +155,16 @@ const buildReadableTranscriptBlocks = (
   chunkIndex: number,
   segments: TranscriptionSegment[],
 ): LiveTranscriptItem[] => {
-  const sortedSegments = [...segments]
-    .map((segment) => ({ ...segment, text: cleanText(segment.text) }))
-    .filter((segment) => segment.text.length > 0)
-    .sort((a, b) => a.start - b.start);
+  const sortedSegments = isSortedByStart(segments)
+    ? segments
+    : segments.slice().sort((a, b) => a.start - b.start);
   const blocks: LiveTranscriptItem[] = [];
 
-  for (const segment of sortedSegments) {
+  for (const rawSegment of sortedSegments) {
+    const text = cleanText(rawSegment.text);
+    if (!text) continue;
+    const segment =
+      text === rawSegment.text ? rawSegment : { ...rawSegment, text };
     const current = blocks.length > 0 ? blocks[blocks.length - 1] : undefined;
     if (current && shouldMergeTranscriptSegment(current, segment)) {
       const end = Math.max(current.end, segment.end);
@@ -206,7 +220,9 @@ export const applyLiveTranscriptSpeakers = (
   diarizedSegments: DiarizedSegment[],
 ): LiveProcessingState => {
   if (diarizedSegments.length === 0 || state.transcript.length === 0) return state;
-  const sortedSegments = [...diarizedSegments].sort((a, b) => a.start - b.start);
+  const sortedSegments = isSortedByStart(diarizedSegments)
+    ? diarizedSegments
+    : diarizedSegments.slice().sort((a, b) => a.start - b.start);
   let cursor = 0;
 
   const transcript = state.transcript.map((item) => {
@@ -237,7 +253,7 @@ export const appendLiveInsights = (
   state: LiveProcessingState,
   insights: MeetingChunkInsights,
   maxItems = DEFAULT_MAX_INSIGHTS,
-  participantNames: string[] = [],
+  _participantNames: string[] = [],
 ): LiveProcessingState => {
   const nextInsight: LiveInsightItem = {
     id: `chunk:${insights.chunkIndex}`,
@@ -261,7 +277,6 @@ export const appendLiveInsights = (
   return {
     ...state,
     insights: insightsList,
-    minutesDraft: buildLiveMinutesDraft(insightsList, participantNames),
   };
 };
 

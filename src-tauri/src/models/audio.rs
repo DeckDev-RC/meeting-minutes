@@ -44,6 +44,7 @@ pub struct SmartChunkOptions {
     pub silence_min_duration_sec: f64,
     pub silence_noise_db: f64,
     pub output_format: String,
+    pub prepare_strategy: Option<String>,
 }
 
 impl Default for SmartChunkOptions {
@@ -56,6 +57,7 @@ impl Default for SmartChunkOptions {
             silence_min_duration_sec: 0.45,
             silence_noise_db: -35.0,
             output_format: "flac".to_string(),
+            prepare_strategy: None,
         }
     }
 }

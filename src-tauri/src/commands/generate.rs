@@ -4,6 +4,7 @@ use crate::models::transcription::{
 };
 use aho_corasick::AhoCorasick;
 use futures::StreamExt;
+use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -35,17 +36,24 @@ fn gemini_retry_delay(attempt: u32) -> Duration {
     Duration::from_secs(2u64.saturating_pow(attempt).max(1))
 }
 
+fn gemini_request_body_bytes(body: &serde_json::Value) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(body).map_err(|e| e.to_string())
+}
+
 async fn send_gemini_request(
     client: &reqwest::Client,
     gemini_api_key: &str,
     body: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let max_attempts = 3u32;
+    let body_bytes = gemini_request_body_bytes(body)?;
+    let url = gemini_generate_url(gemini_api_key);
 
     for attempt in 0..max_attempts {
         let response = client
-            .post(gemini_generate_url(gemini_api_key))
-            .json(body)
+            .post(&url)
+            .header(CONTENT_TYPE, "application/json")
+            .body(body_bytes.clone())
             .send()
             .await;
 
@@ -721,6 +729,10 @@ fn normalize_insight_names(
     mut insight: MeetingChunkInsights,
     aliases: &PreparedNameAliases,
 ) -> MeetingChunkInsights {
+    if aliases.matcher.is_none() {
+        return insight;
+    }
+
     insight.summary = replace_prepared_name_aliases(&insight.summary, aliases);
     insight.topics = insight
         .topics
@@ -1987,6 +1999,20 @@ mod tests {
         assert_eq!(gemini_retry_delay(0), std::time::Duration::from_secs(1));
         assert_eq!(gemini_retry_delay(1), std::time::Duration::from_secs(2));
         assert_eq!(gemini_retry_delay(2), std::time::Duration::from_secs(4));
+    }
+
+    #[test]
+    fn gemini_request_body_bytes_round_trip_json() {
+        let body = serde_json::json!({
+            "contents": [{
+                "parts": [{ "text": "ola" }]
+            }]
+        });
+
+        let bytes = gemini_request_body_bytes(&body).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(parsed, body);
     }
 
     #[test]

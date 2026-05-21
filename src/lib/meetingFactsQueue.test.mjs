@@ -218,8 +218,6 @@ assert.deepEqual(batched.map((item) => item.summary), ["Batch 1", "Batch 2"]);
 assert.deepEqual(
   batchUpdates.map((item) => [item.index, item.status]),
   [
-    [1, "running"],
-    [2, "running"],
     [1, "done"],
     [2, "done"],
   ],

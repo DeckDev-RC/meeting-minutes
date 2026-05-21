@@ -106,6 +106,7 @@ export interface SmartChunkOptions {
   silenceMinDurationSec: number;
   silenceNoiseDb: number;
   outputFormat: 'flac' | 'wav' | 'mp3';
+  prepareStrategy?: 'parallel' | 'singlePassSilence';
 }
 
 export type DiarizationMode =

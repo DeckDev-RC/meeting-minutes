@@ -341,6 +341,10 @@ fn exported_chunks_from_plans(
         .collect()
 }
 
+fn build_silence_filter(noise_db: f64, min_duration_sec: f64) -> String {
+    format!("silencedetect=noise={}dB:d={}", noise_db, min_duration_sec)
+}
+
 fn input_format_matches_output(input_path: &Path, output_format: &str) -> bool {
     input_path
         .extension()
@@ -700,10 +704,8 @@ pub async fn extract_audio(
     output_path: String,
 ) -> Result<f64, String> {
     let defaults = SmartChunkOptions::default();
-    let silence_filter = format!(
-        "silencedetect=noise={}dB:d={}",
-        defaults.silence_noise_db, defaults.silence_min_duration_sec
-    );
+    let silence_filter =
+        build_silence_filter(defaults.silence_noise_db, defaults.silence_min_duration_sec);
     let stderr = run_extract_audio(
         app.clone(),
         input_path,
@@ -872,6 +874,84 @@ pub async fn create_smart_chunks(
     }
 }
 
+async fn export_planned_smart_chunks(
+    app: tauri::AppHandle,
+    input_path: String,
+    chunk_output_dir: String,
+    output_format: String,
+    plans: Vec<ChunkPlan>,
+) -> Result<Vec<ExportedChunk>, String> {
+    match export_smart_chunks_batch(
+        app.clone(),
+        &input_path,
+        &chunk_output_dir,
+        &output_format,
+        &plans,
+    )
+    .await
+    {
+        Ok(exported) => Ok(exported),
+        Err(_) => {
+            export_smart_chunks_parallel(app, input_path, chunk_output_dir, output_format, plans)
+                .await
+        }
+    }
+}
+
+async fn prepare_audio_and_chunks_single_pass(
+    app: tauri::AppHandle,
+    input_path: String,
+    audio_output_path: String,
+    chunk_output_dir: String,
+    opts: SmartChunkOptions,
+) -> Result<PreparedAudio, String> {
+    let silence_filter = build_silence_filter(opts.silence_noise_db, opts.silence_min_duration_sec);
+    let stderr = run_extract_audio(
+        app.clone(),
+        input_path,
+        audio_output_path.clone(),
+        Some(silence_filter),
+    )
+    .await?;
+    let silences = parse_silencedetect(&stderr);
+    let duration = if let Some(duration) = parse_duration_from_ffmpeg_stderr(&stderr) {
+        duration
+    } else {
+        get_duration(&app, &audio_output_path).await?
+    };
+
+    write_silence_cache(
+        &audio_output_path,
+        opts.silence_noise_db,
+        opts.silence_min_duration_sec,
+        silences.clone(),
+    )
+    .await;
+
+    let plans = plan_smart_chunks(
+        duration,
+        &silences,
+        opts.target_sec,
+        opts.min_sec,
+        opts.max_sec,
+        opts.overlap_sec,
+    );
+    let output_format = validate_chunk_output_format(&opts.output_format)?;
+    let chunks = export_planned_smart_chunks(
+        app,
+        audio_output_path,
+        chunk_output_dir,
+        output_format,
+        plans,
+    )
+    .await?;
+
+    Ok(PreparedAudio {
+        duration_sec: duration,
+        chunks,
+    })
+}
+
 #[command]
 pub async fn prepare_audio_and_chunks(
     app: tauri::AppHandle,
@@ -884,6 +964,17 @@ pub async fn prepare_audio_and_chunks(
     fs::create_dir_all(&chunk_output_dir).map_err(|e| e.to_string())?;
     if let Some(parent) = Path::new(&audio_output_path).parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    if opts.prepare_strategy.as_deref() == Some("singlePassSilence") {
+        return prepare_audio_and_chunks_single_pass(
+            app,
+            input_path,
+            audio_output_path,
+            chunk_output_dir,
+            opts,
+        )
+        .await;
     }
 
     let normalize_future = run_extract_audio(

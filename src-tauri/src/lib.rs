@@ -8,6 +8,14 @@ use tauri_plugin_store::StoreExt;
 
 pub struct HttpClientState(pub reqwest::Client);
 
+fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .pool_max_idle_per_host(4)
+        .tcp_keepalive(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+}
+
 #[tauri::command]
 fn get_api_keys(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     let store = app.store("config.json").map_err(|e| e.to_string())?;
@@ -67,7 +75,9 @@ pub fn run() {
                 .expect("Failed to get app data dir");
             let conn = init_db(&app_data_dir);
             app.manage(DbState(std::sync::Mutex::new(conn)));
-            app.manage(HttpClientState(reqwest::Client::new()));
+            app.manage(HttpClientState(
+                build_http_client().map_err(|e| e.to_string())?,
+            ));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -110,4 +120,14 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builds_tuned_http_client() {
+        assert!(build_http_client().is_ok());
+    }
 }

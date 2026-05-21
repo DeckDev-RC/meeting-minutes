@@ -44,6 +44,7 @@ struct PrepareBenchReport {
     legacy: PrepareBenchResult,
     prepared: PrepareBenchResult,
     speedup_x: f64,
+    faster_strategy: String,
 }
 
 fn arg_value(args: &[String], name: &str) -> Option<String> {
@@ -277,7 +278,7 @@ fn run_legacy(options: &CliOptions) -> Result<PrepareBenchResult, String> {
     )?;
 
     Ok(PrepareBenchResult {
-        label: "legacy_extract_then_chunks".to_string(),
+        label: "single_pass_silence_then_chunks".to_string(),
         wall_clock_sec: started.elapsed().as_secs_f64(),
         duration_sec,
         chunks: plans.len(),
@@ -324,7 +325,7 @@ fn run_prepared(options: &CliOptions) -> Result<PrepareBenchResult, String> {
         .map_err(|_| "normalize worker panicked".to_string())??;
 
     Ok(PrepareBenchResult {
-        label: "prepared_parallel_audio_and_chunks".to_string(),
+        label: "parallel_prepare_audio_and_chunks".to_string(),
         wall_clock_sec: started.elapsed().as_secs_f64(),
         duration_sec,
         chunks: plans.len(),
@@ -346,6 +347,11 @@ fn run() -> Result<(), String> {
     let legacy = run_legacy(&options)?;
     let prepared = run_prepared(&options)?;
     let speedup_x = legacy.wall_clock_sec / prepared.wall_clock_sec.max(0.001);
+    let faster_strategy = if prepared.wall_clock_sec <= legacy.wall_clock_sec {
+        prepared.label.clone()
+    } else {
+        legacy.label.clone()
+    };
     let report = PrepareBenchReport {
         input: options.input.to_string_lossy().to_string(),
         output_format: options.output_format,
@@ -354,6 +360,7 @@ fn run() -> Result<(), String> {
         legacy,
         prepared,
         speedup_x,
+        faster_strategy,
     };
     let report_path = options.out_dir.join("audio-prepare-benchmark.json");
     std::fs::write(
@@ -362,10 +369,11 @@ fn run() -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     eprintln!(
-        "[audio-prepare-benchmark] legacy={:.3}s prepared={:.3}s speedup={:.2}x report={}",
+        "[audio-prepare-benchmark] single-pass={:.3}s parallel={:.3}s speedup={:.2}x faster={} report={}",
         report.legacy.wall_clock_sec,
         report.prepared.wall_clock_sec,
         report.speedup_x,
+        report.faster_strategy,
         report_path.display()
     );
     Ok(())

@@ -31,6 +31,10 @@ import { mergeSortedTranscriptionSegments } from "../lib/segmentMerge";
 import { buildBenchmarkRun, buildBenchmarkRunPath } from "../lib/benchmarkRun";
 import { derivePipelineProgress, type PipelinePhase } from "../lib/pipelineProgress";
 import {
+  factConcurrencyForPhase,
+  transcriptionConcurrencyForProfile,
+} from "../lib/processingConcurrency";
+import {
   applyLiveTranscriptSpeakers,
   appendLiveInsights,
   appendLiveLog,
@@ -42,7 +46,10 @@ import {
   type LiveProcessingState,
   type LiveTab,
 } from "../lib/liveProcessing";
-import { collectExpiredLiveProcessingSnapshotIds } from "../lib/liveProcessingCache";
+import {
+  collectExpiredLiveProcessingSnapshotIds,
+  collectOverflowLiveProcessingSnapshotIds,
+} from "../lib/liveProcessingCache";
 import type {
   ExportedChunk,
   MeetingChunkInsights,
@@ -58,12 +65,16 @@ const liveProcessingSnapshots = new Map<string, LiveProcessingState>();
 const liveProcessingPublishers = new Map<string, (state: LiveProcessingState) => void>();
 const liveProcessingPublishTimers = new Map<string, ReturnType<typeof window.setTimeout>>();
 const liveProcessingLastPublishedAt = new Map<string, number>();
+const liveProcessingTouchedAt = new Map<string, number>();
 const completedProcessingSnapshots = new Map<string, number>();
 const minutesStreamRawSnapshots = new Map<string, string>();
+const liveProcessingParticipantNames = new Map<string, string[]>();
 let visibleProcessingMeetingId: string | null = null;
 
 const LIVE_STATE_PUBLISH_INTERVAL_MS = 160;
 const COMPLETED_SNAPSHOT_TTL_MS = 10 * 60 * 1000;
+const COMPLETED_SNAPSHOT_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
+const MAX_LIVE_PROCESSING_SNAPSHOTS = 5;
 
 type MinutesStreamPayload = {
   meetingId: string;
@@ -74,6 +85,7 @@ type MinutesStreamPayload = {
 type FactQueueItem = {
   chunk: ProcessingChunkRecord;
   segments: TranscriptionSegment[];
+  segmentsJson: string;
 };
 
 const getParentDir = (path: string) => {
@@ -95,8 +107,19 @@ const flushLiveStateSnapshot = (meetingId: string) => {
   const publish = liveProcessingPublishers.get(meetingId);
   const snapshot = liveProcessingSnapshots.get(meetingId);
   if (visibleProcessingMeetingId === meetingId && publish && snapshot) {
+    const participantNames = liveProcessingParticipantNames.get(meetingId) ?? [];
+    const publishSnapshot =
+      snapshot.finalMinutesText || snapshot.insights.length === 0
+        ? snapshot
+        : {
+            ...snapshot,
+            minutesDraft: buildLiveMinutesDraft(snapshot.insights, participantNames),
+          };
+    if (publishSnapshot !== snapshot) {
+      liveProcessingSnapshots.set(meetingId, publishSnapshot);
+    }
     liveProcessingLastPublishedAt.set(meetingId, Date.now());
-    publish(snapshot);
+    publish(publishSnapshot);
   }
 };
 
@@ -123,15 +146,23 @@ const scheduleLiveStatePublish = (meetingId: string) => {
 };
 
 const cleanupCompletedLiveProcessingSnapshots = () => {
+  const activeMeetingIds = new Set(activeProcessingRuns.keys());
   const expiredIds = collectExpiredLiveProcessingSnapshotIds({
     completedAtByMeetingId: completedProcessingSnapshots,
-    activeMeetingIds: new Set(activeProcessingRuns.keys()),
+    activeMeetingIds,
     visibleMeetingId: visibleProcessingMeetingId,
     nowMs: Date.now(),
     ttlMs: COMPLETED_SNAPSHOT_TTL_MS,
   });
+  const overflowIds = collectOverflowLiveProcessingSnapshotIds({
+    snapshotIds: Array.from(liveProcessingSnapshots.keys()),
+    activeMeetingIds,
+    visibleMeetingId: visibleProcessingMeetingId,
+    touchedAtByMeetingId: liveProcessingTouchedAt,
+    maxEntries: MAX_LIVE_PROCESSING_SNAPSHOTS,
+  });
 
-  for (const meetingId of expiredIds) {
+  for (const meetingId of new Set([...expiredIds, ...overflowIds])) {
     const timer = liveProcessingPublishTimers.get(meetingId);
     if (timer) {
       window.clearTimeout(timer);
@@ -139,8 +170,10 @@ const cleanupCompletedLiveProcessingSnapshots = () => {
     }
     liveProcessingSnapshots.delete(meetingId);
     minutesStreamRawSnapshots.delete(meetingId);
+    liveProcessingParticipantNames.delete(meetingId);
     completedProcessingSnapshots.delete(meetingId);
     liveProcessingLastPublishedAt.delete(meetingId);
+    liveProcessingTouchedAt.delete(meetingId);
   }
 };
 
@@ -148,18 +181,6 @@ const markProcessingSnapshotCompleted = (meetingId: string) => {
   completedProcessingSnapshots.set(meetingId, Date.now());
   flushLiveStateSnapshot(meetingId);
   cleanupCompletedLiveProcessingSnapshots();
-};
-
-const transcriptionConcurrencyForProfile = (profile: ProcessingProfile) => {
-  if (profile === "turbo") return 6;
-  if (profile === "precision") return 3;
-  return 4;
-};
-
-const factConcurrencyForProfile = (profile: ProcessingProfile) => {
-  if (profile === "turbo") return 4;
-  if (profile === "precision") return 3;
-  return 3;
 };
 
 const chunkOverlapForProfile = (profile: ProcessingProfile) => {
@@ -189,6 +210,25 @@ const toExportedChunk = (chunk: ProcessingChunkRecord): ExportedChunk => ({
   endSec: chunk.endSec,
   offsetSec: chunk.offsetSec,
   durationSec: chunk.durationSec,
+});
+
+const toNewProcessingChunkRecord = (
+  meetingId: string,
+  chunk: ExportedChunk,
+): ProcessingChunkRecord => ({
+  meetingId,
+  index: chunk.index,
+  audioPath: chunk.audioPath,
+  startSec: chunk.startSec,
+  endSec: chunk.endSec,
+  offsetSec: chunk.offsetSec,
+  durationSec: chunk.durationSec,
+  status: "pending",
+  rawSegmentsJson: null,
+  errorMsg: null,
+  factsStatus: "pending",
+  factsJson: null,
+  factsErrorMsg: null,
 });
 
 const sumChunkDurations = (chunks: Pick<ProcessingChunkRecord, "durationSec">[]) =>
@@ -428,6 +468,7 @@ export default function Processing() {
     const current = liveProcessingSnapshots.get(meetingId) ?? createLiveProcessingState();
     const next = updater(current);
     liveProcessingSnapshots.set(meetingId, next);
+    liveProcessingTouchedAt.set(meetingId, Date.now());
     completedProcessingSnapshots.delete(meetingId);
     scheduleLiveStatePublish(meetingId);
   };
@@ -513,18 +554,22 @@ export default function Processing() {
     }
   };
 
+  const transcriptCount = liveState.transcript.length;
+  const insightCount = liveState.insights.length;
+  const logCount = liveState.logs.length;
+  const hasMinutesPreview = Boolean(liveState.finalMinutesText || liveState.minutesDraft);
   const liveTabItems = useMemo(
     () => [
-      { key: "transcript" as const, label: "Transcricao", count: liveState.transcript.length },
-      { key: "insights" as const, label: "Insights", count: liveState.insights.length },
+      { key: "transcript" as const, label: "Transcricao", count: transcriptCount },
+      { key: "insights" as const, label: "Insights", count: insightCount },
       {
         key: "minutes" as const,
         label: "Ata",
-        count: liveState.finalMinutesText || liveState.minutesDraft ? 1 : 0,
+        count: hasMinutesPreview ? 1 : 0,
       },
-      { key: "logs" as const, label: "Logs tecnicos", count: liveState.logs.length },
+      { key: "logs" as const, label: "Logs tecnicos", count: logCount },
     ],
-    [liveState],
+    [hasMinutesPreview, insightCount, logCount, transcriptCount],
   );
 
   useEffect(() => {
@@ -535,7 +580,15 @@ export default function Processing() {
       top: transcriptAutoScrollRef.current ? container.scrollHeight : 0,
       behavior: transcriptAutoScrollRef.current ? "smooth" : "auto",
     });
-  }, [liveTab, liveState.transcript.length]);
+  }, [liveTab, transcriptCount]);
+
+  useEffect(() => {
+    const cleanupTimer = window.setInterval(
+      cleanupCompletedLiveProcessingSnapshots,
+      COMPLETED_SNAPSHOT_CLEANUP_INTERVAL_MS,
+    );
+    return () => window.clearInterval(cleanupTimer);
+  }, []);
 
   useEffect(() => {
     if (!id) return;
@@ -543,6 +596,7 @@ export default function Processing() {
     setCurrentMeeting(id);
     const snapshot = liveProcessingSnapshots.get(id) ?? createLiveProcessingState();
     liveProcessingSnapshots.set(id, snapshot);
+    liveProcessingTouchedAt.set(id, Date.now());
     liveProcessingPublishers.set(id, setLiveState);
     setLiveState(snapshot);
     liveProcessingLastPublishedAt.set(id, Date.now());
@@ -664,6 +718,7 @@ export default function Processing() {
       }
       const processingProfile = normalizeProcessingProfile(meeting.processingProfile);
       const participantNames = parseParticipantsHint(meeting.participantsHint);
+      liveProcessingParticipantNames.set(meetingId, participantNames);
       const meetingMetadata = await probeMediaMetadata(meeting.filePath).catch((err) => {
         console.warn("Failed to probe media metadata:", err);
         return {
@@ -725,7 +780,9 @@ export default function Processing() {
         updatePipelineProgress("detect_speech", 0, durationSec, 0, 0);
         updatePipelineProgress("create_chunks", 0, durationSec, 0, 0);
         await saveProcessingChunks(meetingId, prepared.chunks);
-        storedChunks = await getProcessingChunks(meetingId);
+        storedChunks = prepared.chunks.map((chunk) =>
+          toNewProcessingChunkRecord(meetingId, chunk),
+        );
         durationSec = sumChunkDurations(storedChunks);
         addLiveLog(meetingId, "success", `${storedChunks.length} chunks criados.`);
       }
@@ -752,6 +809,11 @@ export default function Processing() {
       const parsedSegmentsByChunk = new Map(
         completedSegmentsByChunk.map(({ chunk, segments }) => [chunk.index, segments]),
       );
+      const segmentJsonByChunk = new Map(
+        completedStoredChunks.flatMap((chunk) =>
+          chunk.rawSegmentsJson ? [[chunk.index, chunk.rawSegmentsJson] as const] : [],
+        ),
+      );
       const completedSegments = completedSegmentsByChunk.flatMap((item) => item.segments);
       for (const { chunk, segments } of completedSegmentsByChunk) {
         commitLiveState(meetingId, (state) =>
@@ -759,13 +821,15 @@ export default function Processing() {
         );
       }
       const completedAudioSec = sumChunkDurations(completedStoredChunks);
+      let transcribedAudioSec = completedAudioSec;
+      let transcribedChunkCount = completedStoredChunks.length;
       const pendingChunks = storedChunks.flatMap((chunk, index) =>
         chunk.status !== "done" ? [exportedChunks[index]] : [],
       );
       const pendingChunkByPath = new Map(pendingChunks.map((chunk) => [chunk.audioPath, chunk]));
       const factResults = new Map<number, MeetingChunkInsights>();
       const factQueue: FactQueueItem[] = [];
-      const factConcurrency = factConcurrencyForProfile(processingProfile);
+      let factConcurrencyLimit = factConcurrencyForPhase(processingProfile, false);
       let activeFactWorkers = 0;
       let completedFactChunks = 0;
       let factsInputClosed = false;
@@ -805,8 +869,8 @@ export default function Processing() {
       };
 
       const drainFactQueue = () => {
-        while (!factsFailed && activeFactWorkers < factConcurrency && factQueue.length > 0) {
-          const { chunk, segments: factSegments } = factQueue.shift()!;
+        while (!factsFailed && activeFactWorkers < factConcurrencyLimit && factQueue.length > 0) {
+          const { chunk, segmentsJson } = factQueue.shift()!;
           activeFactWorkers += 1;
           void (async () => {
             let runningPersist = Promise.resolve();
@@ -821,7 +885,7 @@ export default function Processing() {
                 chunk.index,
                 chunk.startSec,
                 chunk.endSec,
-                JSON.stringify(factSegments),
+                segmentsJson,
                 keys.gemini,
                 participantNames,
               );
@@ -887,12 +951,17 @@ export default function Processing() {
         const segmentsForChunk = knownSegments ?? parseStoredSegments(chunk);
         if (chunk.status !== "done" || segmentsForChunk.length === 0) return;
         parsedSegmentsByChunk.set(chunk.index, segmentsForChunk);
-        factQueue.push({ chunk, segments: segmentsForChunk });
+        const segmentsJson =
+          segmentJsonByChunk.get(chunk.index) ?? JSON.stringify(segmentsForChunk);
+        segmentJsonByChunk.set(chunk.index, segmentsJson);
+        factQueue.push({ chunk, segments: segmentsForChunk, segmentsJson });
         drainFactQueue();
       };
 
       const closeFactInput = () => {
         factsInputClosed = true;
+        factConcurrencyLimit = factConcurrencyForPhase(processingProfile, true);
+        drainFactQueue();
         maybeResolveFacts();
         return factsReadyPromise;
       };
@@ -943,6 +1012,7 @@ export default function Processing() {
             }
             const rawSegmentsJson = JSON.stringify(segments);
             if (chunk) {
+              segmentJsonByChunk.set(chunk.index, rawSegmentsJson);
               const updatedChunk = patchStoredChunk(chunk.index, {
                 status: "done",
                 rawSegmentsJson,
@@ -979,11 +1049,13 @@ export default function Processing() {
           }
         },
         onChunkDone: (event) => {
+          transcribedAudioSec = completedAudioSec + event.completedAudioSec;
+          transcribedChunkCount = completedStoredChunks.length + event.completedChunks;
           updatePipelineProgress(
             "transcribe",
-            completedAudioSec + event.completedAudioSec,
+            transcribedAudioSec,
             totalAudioSec,
-            completedStoredChunks.length + event.completedChunks,
+            transcribedChunkCount,
             storedChunks.length,
           );
         },
@@ -1026,11 +1098,12 @@ export default function Processing() {
         }
 
         if (speculative.turns.length > 0) {
+          const speakerTurnsJson = JSON.stringify(speculative.turns);
           try {
             if (processingProfile === "turbo") {
               const aligned = await alignSpeakerTurnsToTranscription(
                 segmentsJson,
-                JSON.stringify(speculative.turns),
+                speakerTurnsJson,
               );
               setStepStatus("diarize", "done");
               addLiveLog(meetingId, "success", "Falantes alinhados.");
@@ -1040,7 +1113,7 @@ export default function Processing() {
             const maxRefinementChunks = processingProfile === "precision" ? 3 : 1;
             const refined = await refineDiarizationSelectively(
               segmentsJson,
-              JSON.stringify(speculative.turns),
+              speakerTurnsJson,
               exportedChunks,
               {
                 expectedSpeakers: keys.expectedSpeakers,
@@ -1073,6 +1146,12 @@ export default function Processing() {
         addLiveLog(meetingId, "error", `Falha na diarizacao: ${formatError(err)}`);
         throw err;
       });
+      const diarizedWithLiveSpeakersPromise = diarizedPromise.then((diarized) => {
+        commitLiveState(meetingId, (state) =>
+          applyLiveTranscriptSpeakers(state, diarized.segments),
+        );
+        return diarized;
+      });
 
       // Step 4: Extract compact facts per chunk without waiting for speaker alignment.
       setStep("generate");
@@ -1090,17 +1169,19 @@ export default function Processing() {
       setLiveTab("insights");
       reportFactProgress();
 
-      const [diarized, meetingFacts] = await Promise.all([diarizedPromise, meetingFactsPromise]);
-      commitLiveState(meetingId, (state) =>
-        applyLiveTranscriptSpeakers(state, diarized.segments),
-      );
+      const [diarized, meetingFacts] = await Promise.all([
+        diarizedWithLiveSpeakersPromise,
+        meetingFactsPromise,
+      ]);
       const diarizedJson = JSON.stringify(diarized);
+      const diarizedSpeakersJson = JSON.stringify(diarized.speakers);
+      const meetingFactsJson = JSON.stringify(meetingFacts);
 
       await saveTranscription(
         meetingId,
         segmentsJson,
         diarizedJson,
-        JSON.stringify(diarized.speakers)
+        diarizedSpeakersJson
       );
 
       updatePipelineProgress(
@@ -1122,7 +1203,7 @@ export default function Processing() {
       const ataHtml = await generateAtaFromFactsStreaming(
         meetingId,
         diarizedJson,
-        JSON.stringify(meetingFacts),
+        meetingFactsJson,
         keys.gemini,
         participantNames,
         meetingMetadata,

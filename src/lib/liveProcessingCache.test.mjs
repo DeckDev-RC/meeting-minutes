@@ -37,7 +37,7 @@ const compile = spawnSync(
 
 assert.equal(compile.status, 0, compile.stdout + compile.stderr);
 
-const { collectExpiredLiveProcessingSnapshotIds } = require(
+const { collectExpiredLiveProcessingSnapshotIds, collectOverflowLiveProcessingSnapshotIds } = require(
   join(outDir, "liveProcessingCache.js"),
 );
 
@@ -55,3 +55,19 @@ const expired = collectExpiredLiveProcessingSnapshotIds({
 });
 
 assert.deepEqual(expired, ["old-done"]);
+
+const overflow = collectOverflowLiveProcessingSnapshotIds({
+  snapshotIds: ["oldest", "visible", "running", "middle", "newest"],
+  activeMeetingIds: new Set(["running"]),
+  visibleMeetingId: "visible",
+  touchedAtByMeetingId: new Map([
+    ["oldest", 1_000],
+    ["middle", 2_000],
+    ["newest", 3_000],
+    ["visible", 500],
+    ["running", 400],
+  ]),
+  maxEntries: 3,
+});
+
+assert.deepEqual(overflow, ["oldest", "middle"]);

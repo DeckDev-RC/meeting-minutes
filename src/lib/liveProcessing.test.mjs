@@ -126,6 +126,7 @@ state = appendLiveInsights(state, {
 assert.equal(state.insights.length, 1);
 assert.equal(state.insights[0].decisionCount, 1);
 assert.equal(state.insights[0].actionCount, 1);
+assert.equal(state.minutesDraft, "");
 
 const draft = buildLiveMinutesDraft(state.insights, ["Caio", "Emanuella"]);
 assert.match(draft, /Participantes: Caio, Emanuella/);

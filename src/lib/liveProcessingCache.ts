@@ -6,6 +6,14 @@ export type ExpiredLiveProcessingSnapshotInput = {
   ttlMs: number;
 };
 
+export type OverflowLiveProcessingSnapshotInput = {
+  snapshotIds: string[];
+  activeMeetingIds: Set<string>;
+  visibleMeetingId: string | null;
+  touchedAtByMeetingId: Map<string, number>;
+  maxEntries: number;
+};
+
 export function collectExpiredLiveProcessingSnapshotIds({
   completedAtByMeetingId,
   activeMeetingIds,
@@ -25,4 +33,28 @@ export function collectExpiredLiveProcessingSnapshotIds({
   }
 
   return expired;
+}
+
+export function collectOverflowLiveProcessingSnapshotIds({
+  snapshotIds,
+  activeMeetingIds,
+  visibleMeetingId,
+  touchedAtByMeetingId,
+  maxEntries,
+}: OverflowLiveProcessingSnapshotInput): string[] {
+  if (!Number.isFinite(maxEntries) || maxEntries <= 0 || snapshotIds.length <= maxEntries) {
+    return [];
+  }
+
+  const removable = snapshotIds
+    .filter((meetingId) => !activeMeetingIds.has(meetingId) && visibleMeetingId !== meetingId)
+    .sort(
+      (left, right) =>
+        (touchedAtByMeetingId.get(left) ?? 0) - (touchedAtByMeetingId.get(right) ?? 0),
+    );
+
+  const protectedCount = snapshotIds.length - removable.length;
+  const removeCount = Math.max(0, snapshotIds.length - Math.max(maxEntries, protectedCount));
+
+  return removable.slice(0, removeCount);
 }

@@ -276,12 +276,8 @@ export async function extractMeetingFactsConcurrently({
       while (!failed && nextIndex < batches.length) {
         const batch = batches[nextIndex];
         nextIndex += 1;
-        let runningPersists: Array<Promise<void>> = [];
 
         try {
-          runningPersists = batch.items.map((item) =>
-            persistFactStatus(updateChunkFacts, item.chunk, 'running').catch(() => {})
-          );
           const extracted = await batchExtractor(batch.items, apiKey);
           const byChunkIndex = new Map(extracted.map((insight) => [insight.chunkIndex, insight]));
 
@@ -289,7 +285,6 @@ export async function extractMeetingFactsConcurrently({
             return;
           }
 
-          await Promise.all(runningPersists);
           await Promise.all(batch.items.map(async (item) => {
             const insights = byChunkIndex.get(item.chunk.index) ?? fallbackInsightsForChunk(item.chunk, item.segments);
             await persistFactStatus(updateChunkFacts, item.chunk, 'done', JSON.stringify(insights));
@@ -300,7 +295,6 @@ export async function extractMeetingFactsConcurrently({
           }));
         } catch (error) {
           failed = true;
-          await Promise.all(runningPersists);
           await Promise.all(
             batch.items.map((item) =>
               persistFactStatus(updateChunkFacts, item.chunk, 'error', undefined, formatError(error)).catch(() => {})
