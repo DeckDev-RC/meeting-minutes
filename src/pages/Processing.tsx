@@ -28,6 +28,7 @@ import {
 } from "../lib/tauri";
 import { transcribeChunksConcurrently } from "../lib/transcriptionQueue";
 import { mergeSortedTranscriptionSegments } from "../lib/segmentMerge";
+import { resolveSegmentsForFactScheduling } from "../lib/processingChunks";
 import { buildBenchmarkRun, buildBenchmarkRunPath } from "../lib/benchmarkRun";
 import { derivePipelineProgress, type PipelinePhase } from "../lib/pipelineProgress";
 import {
@@ -938,6 +939,12 @@ export default function Processing() {
         knownSegments = parsedSegmentsByChunk.get(chunk.index),
       ) => {
         if (factsFailed || factResults.has(chunk.index)) return;
+        const segmentsForChunk = resolveSegmentsForFactScheduling(
+          chunk,
+          knownSegments,
+          parseStoredSegments,
+        );
+        if (!segmentsForChunk) return;
         const cached = parseCachedFacts(chunk);
         if (cached) {
           factResults.set(chunk.index, cached);
@@ -948,8 +955,6 @@ export default function Processing() {
           reportFactProgress();
           return;
         }
-        const segmentsForChunk = knownSegments ?? parseStoredSegments(chunk);
-        if (chunk.status !== "done" || segmentsForChunk.length === 0) return;
         parsedSegmentsByChunk.set(chunk.index, segmentsForChunk);
         const segmentsJson =
           segmentJsonByChunk.get(chunk.index) ?? JSON.stringify(segmentsForChunk);
