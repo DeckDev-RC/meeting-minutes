@@ -464,6 +464,33 @@ pub fn build_smart_chunk_export_args(
     }
 }
 
+fn build_parallel_chunk_export_args(
+    input_path: &Path,
+    audio_path: &Path,
+    output_format: &str,
+    plan: &ChunkPlan,
+) -> Vec<String> {
+    let chunk_duration = plan.end_sec - plan.start_sec;
+    let mut args = vec![
+        "-ss".to_string(),
+        format_ffmpeg_seconds(plan.start_sec),
+        "-i".to_string(),
+        input_path.to_string_lossy().to_string(),
+        "-t".to_string(),
+        format_ffmpeg_seconds(chunk_duration),
+        "-map".to_string(),
+        "0:a:0".to_string(),
+        "-vn".to_string(),
+        "-ar".to_string(),
+        "16000".to_string(),
+        "-ac".to_string(),
+        "1".to_string(),
+    ];
+    args.extend(audio_codec_args(output_format));
+    args.extend(["-y".to_string(), audio_path.to_string_lossy().to_string()]);
+    args
+}
+
 async fn run_extract_audio(
     app: tauri::AppHandle,
     input_path: String,
@@ -898,6 +925,10 @@ async fn export_planned_smart_chunks(
     }
 }
 
+fn should_use_parallel_prepare(opts: &SmartChunkOptions) -> bool {
+    opts.prepare_strategy.as_deref() == Some("parallel")
+}
+
 async fn prepare_audio_and_chunks_single_pass(
     app: tauri::AppHandle,
     input_path: String,
@@ -966,7 +997,7 @@ pub async fn prepare_audio_and_chunks(
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    if opts.prepare_strategy.as_deref() == Some("singlePassSilence") {
+    if !should_use_parallel_prepare(&opts) {
         return prepare_audio_and_chunks_single_pass(
             app,
             input_path,
@@ -1117,30 +1148,18 @@ async fn export_smart_chunks_parallel(
             let output_format = output_format.clone();
             async move {
                 let chunk_duration = plan.end_sec - plan.start_sec;
-                let audio_path = Path::new(output_dir.as_ref())
-                    .join(format!(
-                        "chunk_{:03}.{}",
-                        plan.index,
-                        output_format.as_ref()
-                    ))
-                    .to_string_lossy()
-                    .to_string();
-                let start_arg = format!("{:.3}", plan.start_sec);
-                let duration_arg = format!("{:.3}", chunk_duration);
-                let mut args = vec![
-                    "-ss".to_string(),
-                    start_arg,
-                    "-i".to_string(),
-                    input_path.to_string(),
-                    "-t".to_string(),
-                    duration_arg,
-                    "-ar".to_string(),
-                    "16000".to_string(),
-                    "-ac".to_string(),
-                    "1".to_string(),
-                ];
-                args.extend(audio_codec_args(output_format.as_ref()));
-                args.extend(["-y".to_string(), audio_path.clone()]);
+                let audio_path_buf = Path::new(output_dir.as_ref()).join(format!(
+                    "chunk_{:03}.{}",
+                    plan.index,
+                    output_format.as_ref()
+                ));
+                let audio_path = audio_path_buf.to_string_lossy().to_string();
+                let args = build_parallel_chunk_export_args(
+                    Path::new(input_path.as_ref()),
+                    &audio_path_buf,
+                    output_format.as_ref(),
+                    &plan,
+                );
 
                 let output = app
                     .shell()
@@ -1306,6 +1325,42 @@ mod tests {
         assert!(!args.iter().any(|arg| arg.contains("silencedetect")));
         assert!(args.iter().any(|arg| arg == "meeting.mp4"));
         assert!(args.iter().any(|arg| arg == "meeting.wav"));
+    }
+
+    #[test]
+    fn default_prepare_strategy_uses_single_pass_audio_workspace() {
+        let mut opts = SmartChunkOptions::default();
+
+        assert!(!should_use_parallel_prepare(&opts));
+
+        opts.prepare_strategy = Some("parallel".to_string());
+        assert!(should_use_parallel_prepare(&opts));
+
+        opts.prepare_strategy = Some("singlePassSilence".to_string());
+        assert!(!should_use_parallel_prepare(&opts));
+    }
+
+    #[test]
+    fn parallel_chunk_export_args_select_audio_stream_only() {
+        let plan = ChunkPlan {
+            index: 2,
+            start_sec: 12.5,
+            end_sec: 45.0,
+            offset_sec: 12.5,
+        };
+
+        let args = build_parallel_chunk_export_args(
+            Path::new("meeting.mp4"),
+            Path::new("chunks/chunk_002.flac"),
+            "flac",
+            &plan,
+        );
+
+        assert!(args.windows(2).any(|pair| pair == ["-map", "0:a:0"]));
+        assert!(args.iter().any(|arg| arg == "-vn"));
+        assert!(args.windows(2).any(|pair| pair == ["-ss", "12.500"]));
+        assert!(args.windows(2).any(|pair| pair == ["-t", "32.500"]));
+        assert_eq!(args.last().map(String::as_str), Some("chunks/chunk_002.flac"));
     }
 
     #[test]

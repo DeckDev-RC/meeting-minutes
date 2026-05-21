@@ -294,6 +294,15 @@ Tempos do run local `real-2026-05-08-154829-current`:
 
 Conclusao: para essa reuniao, a otimizacao de maior impacto e manter WAV/chunks/cache em workspace local e salvar no Drive apenas os artefatos finais. Depois disso, o gargalo real passa a ser `max(diarize_speculative, extract_facts_parallel)` mais a geracao final.
 
+Nova investigacao no mesmo dia, com o arquivo copiado para `C:\2026-05-08 15-48-29.mp4`, mostrou outro gargalo no app instalado: o caminho padrao ainda exportava chunks a partir do MP4 original. O FFmpeg observado em producao rodava comandos como `-ss ... -i C:\2026-05-08 15-48-29.mp4 -t ... -ar 16000 -ac 1 -c:a flac ...`, sem `-map 0:a:0` e sem `-vn`, mantendo tres processos em CPU por varios minutos e gerando chunks de `0` bytes durante a espera. A correcao foi tornar `singlePassSilence` o padrao de `prepare_audio_and_chunks`, exportando chunks a partir do WAV normalizado, e adicionar `-map 0:a:0 -vn` ao fallback paralelo.
+
+Benchmark isolado de preparacao:
+
+| Arquivo | Duracao | FPS | single-pass WAV/chunks | paralelo a partir do MP4 | Observacao |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `C:\2026-05-08 15-48-29.mp4` | 986.93s | 60 | 1.12s | 58.64s | caso lento reportado |
+| `C:\Users\User\Videos\2026-05-15 10-05-59.mp4` | 1218.23s | 30 | 1.59s | 39.88s | reuniao mais longa, mas menos custosa |
+
 Conclusao pratica:
 
 - A segunda passada seletiva nao deve usar Sherpa no caminho rapido: no AMI `ES2002a`, mesmo uma tentativa seletiva custou `445.82s` E2E.

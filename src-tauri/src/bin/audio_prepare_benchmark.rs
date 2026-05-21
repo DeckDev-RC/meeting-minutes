@@ -179,6 +179,8 @@ fn chunk_args(
         input_path.to_string_lossy().to_string(),
         "-t".to_string(),
         format!("{:.3}", plan.end_sec - plan.start_sec),
+        "-map".to_string(),
+        "0:a:0".to_string(),
         "-vn".to_string(),
         "-ar".to_string(),
         "16000".to_string(),
