@@ -9,6 +9,7 @@ import {
   diarizeAudioTurnsModernCpuChunked,
   diarizeAudioTurnsPyannote,
   diarizeTranscriptionEndToEnd,
+  extractFactBatch,
   extractChunkFacts,
   generateAtaFromFactsStreaming,
   getProcessingChunks,
@@ -29,6 +30,7 @@ import {
 import { transcribeChunksConcurrently } from "../lib/transcriptionQueue";
 import { mergeSortedTranscriptionSegments } from "../lib/segmentMerge";
 import { resolveSegmentsForFactScheduling } from "../lib/processingChunks";
+import { buildAdaptiveFactBatches, type FactBatchItem } from "../lib/meetingFactsQueue";
 import { buildBenchmarkRun, buildBenchmarkRunPath } from "../lib/benchmarkRun";
 import { derivePipelineProgress, type PipelinePhase } from "../lib/pipelineProgress";
 import {
@@ -730,7 +732,7 @@ export default function Processing() {
       setRunProfile(processingProfile);
       setProcessingNote(
         processingProfile === "precision"
-          ? "Precisao: CPU moderno em blocos paralelos quando ha numero esperado de falantes; depois refina trechos suspeitos."
+          ? "Precisao: CPU moderno em blocos quando ha numero esperado de falantes; depois refina trechos suspeitos."
           : processingProfile === "turbo"
             ? "Turbo: chunks sem overlap para exportacao em lote, transcricao mais concorrente e sem refinamento seletivo."
             : "Motor CPU moderno ativo para identificar falantes em paralelo.",
@@ -830,6 +832,7 @@ export default function Processing() {
       const pendingChunkByPath = new Map(pendingChunks.map((chunk) => [chunk.audioPath, chunk]));
       const factResults = new Map<number, MeetingChunkInsights>();
       const factQueue: FactQueueItem[] = [];
+      const factBatchQueue: FactBatchItem[][] = [];
       let factConcurrencyLimit = factConcurrencyForPhase(processingProfile, false);
       let activeFactWorkers = 0;
       let completedFactChunks = 0;
@@ -863,14 +866,94 @@ export default function Processing() {
           !factsFailed &&
           factsInputClosed &&
           activeFactWorkers === 0 &&
-          factQueue.length === 0
+          factQueue.length === 0 &&
+          factBatchQueue.length === 0
         ) {
           resolveFacts(orderedFactResults());
         }
       };
 
       const drainFactQueue = () => {
-        while (!factsFailed && activeFactWorkers < factConcurrencyLimit && factQueue.length > 0) {
+        while (
+          !factsFailed &&
+          activeFactWorkers < factConcurrencyLimit &&
+          (factBatchQueue.length > 0 || factQueue.length > 0)
+        ) {
+          const batch = factBatchQueue.shift();
+          if (batch) {
+            activeFactWorkers += 1;
+            void (async () => {
+              const runningPersists = batch.map((item) =>
+                updateProcessingChunkFacts(meetingId, item.chunk.index, "running").catch(() => {}),
+              );
+              try {
+                for (const item of batch) {
+                  patchStoredChunk(item.chunk.index, { factsStatus: "running" });
+                }
+                const insightsList = await extractFactBatch(batch, keys.gemini, participantNames);
+                const insightsByChunk = new Map(
+                  insightsList.map((insights) => [insights.chunkIndex, insights]),
+                );
+                await Promise.all(runningPersists);
+
+                for (const item of batch) {
+                  const insights = insightsByChunk.get(item.chunk.index) ?? {
+                    chunkIndex: item.chunk.index,
+                    startSec: item.chunk.startSec,
+                    endSec: item.chunk.endSec,
+                    summary: item.segments.map((segment) => segment.text).join(" ").slice(0, 420),
+                    topics: [],
+                    decisions: [],
+                    actions: [],
+                    questions: [],
+                    risks: [],
+                  };
+                  commitLiveState(meetingId, (state) =>
+                    appendLiveInsights(state, insights, undefined, participantNames),
+                  );
+                  const factsJson = JSON.stringify(insights);
+                  await updateProcessingChunkFacts(meetingId, item.chunk.index, "done", factsJson);
+                  factResults.set(item.chunk.index, insights);
+                  patchStoredChunk(item.chunk.index, {
+                    factsStatus: "done",
+                    factsJson,
+                    factsErrorMsg: null,
+                  });
+                  completedFactChunks += 1;
+                }
+                addLiveLog(meetingId, "success", `${batch.length} chunks de insights extraidos em lote.`);
+                reportFactProgress();
+              } catch (err) {
+                factsFailed = true;
+                addLiveLog(meetingId, "error", `Falha nos insights em lote: ${formatError(err)}`);
+                await Promise.all(runningPersists);
+                await Promise.all(
+                  batch.map((item) =>
+                    updateProcessingChunkFacts(
+                      meetingId,
+                      item.chunk.index,
+                      "error",
+                      undefined,
+                      formatError(err),
+                    ).catch(() => {}),
+                  ),
+                );
+                for (const item of batch) {
+                  patchStoredChunk(item.chunk.index, {
+                    factsStatus: "error",
+                    factsErrorMsg: formatError(err),
+                  });
+                }
+                rejectFacts(err);
+              } finally {
+                activeFactWorkers -= 1;
+                drainFactQueue();
+                maybeResolveFacts();
+              }
+            })();
+            continue;
+          }
+
           const { chunk, segmentsJson } = factQueue.shift()!;
           activeFactWorkers += 1;
           void (async () => {
@@ -966,6 +1049,15 @@ export default function Processing() {
       const closeFactInput = () => {
         factsInputClosed = true;
         factConcurrencyLimit = factConcurrencyForPhase(processingProfile, true);
+        if (factQueue.length > 1) {
+          const pendingItems = factQueue.splice(0, factQueue.length);
+          const byChunkIndex = new Map(pendingItems.map((item) => [item.chunk.index, item]));
+          const batches = buildAdaptiveFactBatches({
+            chunks: pendingItems.map((item) => item.chunk),
+            parseSegments: (chunk) => byChunkIndex.get(chunk.index)?.segments ?? [],
+          });
+          factBatchQueue.push(...batches.map((batch) => batch.items));
+        }
         drainFactQueue();
         maybeResolveFacts();
         return factsReadyPromise;
@@ -981,7 +1073,7 @@ export default function Processing() {
         audioOutput,
         keys.expectedSpeakers,
         exportedChunks,
-        processingProfile !== "turbo",
+        processingProfile === "precision",
         false,
       );
 
@@ -1088,7 +1180,7 @@ export default function Processing() {
           setProcessingNote("Pyannote Community-1 ativo nesta reuniao.");
         } else if (speculative.engine === "modern-cpu-chunked") {
           setProcessingNote(
-            "CPU moderno em blocos paralelos ativo; falantes normalizados pelo numero esperado.",
+            "CPU moderno em blocos ativo; falantes normalizados pelo numero esperado.",
           );
         } else if (speculative.engine === "modern-cpu") {
           setProcessingNote(
@@ -1144,6 +1236,16 @@ export default function Processing() {
           expectedSpeakers: keys.expectedSpeakers,
         });
         setStepStatus("diarize", "done");
+        if (fallback.telemetry) {
+          addLiveLog(
+            meetingId,
+            "info",
+            `Diarizacao: modo ${fallback.telemetry.requestedMode}, backend ${fallback.telemetry.backendUsed}, ${fallback.telemetry.wallClockSec.toFixed(1)}s.`,
+          );
+          if (fallback.telemetry.fallbackReason) {
+            addLiveLog(meetingId, "warning", `Fallback de diarizacao: ${fallback.telemetry.fallbackReason}`);
+          }
+        }
         addLiveLog(meetingId, "success", "Diarizacao concluida.");
         return fallback;
       })().catch((err) => {

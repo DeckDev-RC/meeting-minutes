@@ -11,6 +11,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Instant;
 use tauri::{command, Manager};
 use tauri_plugin_shell::ShellExt;
 use tokio::io::AsyncWriteExt;
@@ -64,6 +65,36 @@ pub struct PyannoteBackendPaths {
     pub script_path: PathBuf,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModernCpuBatchChunkOutput {
+    index: usize,
+    offset_sec: f64,
+    diarized: DiarizedResult,
+    #[serde(default)]
+    speaker_centroids: Vec<SpeakerCentroid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeakerCentroid {
+    pub speaker: String,
+    pub embedding: Vec<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct DiarizedChunkResult {
+    diarized: DiarizedResult,
+    speaker_centroids: Vec<SpeakerCentroid>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct GlobalSpeakerCentroid {
+    speaker: String,
+    embedding: Vec<f64>,
+    observations: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RefinementWindow {
     pub chunk: ExportedChunk,
@@ -107,6 +138,134 @@ impl DiarizationMode {
             Some("auto") => Self::Auto,
             _ => Self::Auto,
         }
+    }
+}
+
+pub fn diarization_mode_label(mode: DiarizationMode) -> &'static str {
+    match mode {
+        DiarizationMode::Auto => "auto",
+        DiarizationMode::Fast => "fast",
+        DiarizationMode::Hybrid => "hybrid",
+        DiarizationMode::ModernCpu => "modern-cpu",
+        DiarizationMode::ModernCpuChunked => "modern-cpu-chunked",
+        DiarizationMode::Precise => "precise",
+        DiarizationMode::Pyannote => "pyannote",
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiarizationBackend {
+    FastLocal,
+    ModernCpu,
+    ModernCpuChunked,
+    Pyannote,
+    SherpaHybrid,
+    SherpaPrecise,
+}
+
+pub fn diarization_backend_label(backend: DiarizationBackend) -> &'static str {
+    match backend {
+        DiarizationBackend::FastLocal => "fast-local",
+        DiarizationBackend::ModernCpu => "modern-cpu",
+        DiarizationBackend::ModernCpuChunked => "modern-cpu-chunked",
+        DiarizationBackend::Pyannote => "pyannote",
+        DiarizationBackend::SherpaHybrid => "sherpa-hybrid",
+        DiarizationBackend::SherpaPrecise => "sherpa-precise",
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiarizationTelemetry {
+    pub requested_mode: String,
+    pub backend_used: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+    pub wall_clock_sec: f64,
+    pub speaker_count: usize,
+    pub segment_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiarizationRun {
+    pub result: DiarizedResult,
+    pub telemetry: DiarizationTelemetry,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiarizedResultWithTelemetry {
+    pub speakers: Vec<String>,
+    pub segments: Vec<DiarizedSegment>,
+    pub telemetry: DiarizationTelemetry,
+}
+
+impl From<DiarizationRun> for DiarizedResultWithTelemetry {
+    fn from(run: DiarizationRun) -> Self {
+        Self {
+            speakers: run.result.speakers,
+            segments: run.result.segments,
+            telemetry: run.telemetry,
+        }
+    }
+}
+
+pub fn mode_allows_local_fallback(mode: DiarizationMode) -> bool {
+    mode == DiarizationMode::Auto
+}
+
+pub fn build_diarization_telemetry(
+    requested_mode: DiarizationMode,
+    backend_used: DiarizationBackend,
+    fallback_reason: Option<String>,
+    wall_clock_sec: f64,
+    result: &DiarizedResult,
+) -> DiarizationTelemetry {
+    DiarizationTelemetry {
+        requested_mode: diarization_mode_label(requested_mode).to_string(),
+        backend_used: diarization_backend_label(backend_used).to_string(),
+        fallback_reason: fallback_reason.filter(|value| !value.trim().is_empty()),
+        wall_clock_sec,
+        speaker_count: result.speakers.len(),
+        segment_count: result.segments.len(),
+    }
+}
+
+fn build_diarization_run(
+    requested_mode: DiarizationMode,
+    backend_used: DiarizationBackend,
+    fallback_reason: Option<String>,
+    started: Instant,
+    result: DiarizedResult,
+) -> DiarizationRun {
+    let telemetry = build_diarization_telemetry(
+        requested_mode,
+        backend_used,
+        fallback_reason,
+        started.elapsed().as_secs_f64(),
+        &result,
+    );
+    DiarizationRun { result, telemetry }
+}
+
+fn push_fallback_reason(reasons: &mut Vec<String>, backend: DiarizationBackend, error: String) {
+    let trimmed = error.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    reasons.push(format!(
+        "{} failed: {}",
+        diarization_backend_label(backend),
+        trimmed
+    ));
+}
+
+fn join_fallback_reasons(reasons: &[String]) -> Option<String> {
+    if reasons.is_empty() {
+        None
+    } else {
+        Some(reasons.join(" | "))
     }
 }
 
@@ -227,17 +386,6 @@ pub async fn ensure_diarization_assets_in_dir(
     )?;
 
     Ok(paths)
-}
-
-async fn ensure_diarization_assets(
-    app: &tauri::AppHandle,
-) -> Result<DiarizationAssetPaths, String> {
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Failed to resolve app data directory: {e}"))?;
-
-    ensure_diarization_assets_in_dir(&app_data_dir).await
 }
 
 fn is_title_like_name(candidate: &str) -> bool {
@@ -705,6 +853,97 @@ async fn run_modern_cpu_backend(
     .map_err(|e| format!("Modern CPU diarization worker failed: {e}"))?
 }
 
+fn stitch_modern_cpu_batch_outputs(
+    raw: &str,
+    expected_speakers: Option<i32>,
+) -> Result<DiarizedResult, String> {
+    let mut outputs = serde_json::from_str::<Vec<ModernCpuBatchChunkOutput>>(raw)
+        .map_err(|e| format!("Failed to parse modern CPU batch diarization JSON: {e}"))?;
+    outputs.sort_by_key(|output| output.index);
+    let shifted_chunks = outputs
+        .into_iter()
+        .map(|output| DiarizedChunkResult {
+            diarized: shift_diarized_result(output.diarized, output.offset_sec),
+            speaker_centroids: output.speaker_centroids,
+        })
+        .collect::<Vec<_>>();
+    if shifted_chunks
+        .iter()
+        .any(|chunk| !chunk.speaker_centroids.is_empty())
+    {
+        return Ok(stitch_diarized_chunk_results_with_centroids(
+            shifted_chunks,
+            3.0,
+            expected_speakers,
+        ));
+    }
+
+    let shifted = shifted_chunks
+        .into_iter()
+        .map(|chunk| chunk.diarized)
+        .collect::<Vec<_>>();
+    Ok(stitch_diarized_chunk_results_with_expected_speakers(
+        shifted,
+        3.0,
+        expected_speakers,
+    ))
+}
+
+async fn run_modern_cpu_backend_batch(
+    audio_chunks: Vec<ExportedChunk>,
+    expected_speakers: Option<i32>,
+) -> Result<DiarizedResult, String> {
+    let current_dir =
+        std::env::current_dir().map_err(|e| format!("Failed to resolve current directory: {e}"))?;
+    let backend = resolve_modern_cpu_backend_from_dir(&current_dir)
+        .ok_or_else(|| "Modern CPU diarization backend is not installed".to_string())?;
+    let output_dir = std::env::temp_dir().join(format!(
+        "meeting-minutes-diarize-cpu-batch-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&output_dir)
+        .map_err(|e| format!("Failed to create {}: {e}", output_dir.display()))?;
+    let chunks_path = output_dir.join("chunks.json");
+    let chunks_json = serde_json::to_string(&audio_chunks)
+        .map_err(|e| format!("Failed to serialize modern CPU chunks: {e}"))?;
+    std::fs::write(&chunks_path, chunks_json)
+        .map_err(|e| format!("Failed to write {}: {e}", chunks_path.display()))?;
+
+    tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(&backend.python_exe);
+        hide_command_window(&mut command);
+        command
+            .arg(&backend.script_path)
+            .arg("--chunks-json")
+            .arg(&chunks_path)
+            .arg("--out-dir")
+            .arg(&output_dir);
+
+        if let Some(expected_speakers) = expected_speakers.filter(|value| *value > 0) {
+            command
+                .arg("--num-speakers")
+                .arg(expected_speakers.to_string());
+        }
+
+        let output = command
+            .output()
+            .map_err(|e| format!("Failed to run modern CPU batch diarization backend: {e}"))?;
+        if !output.status.success() {
+            return Err(command_output_error(
+                "Modern CPU batch diarization backend failed",
+                &output,
+            ));
+        }
+
+        let results_path = output_dir.join("chunk-diarized-results.json");
+        let raw = std::fs::read_to_string(&results_path)
+            .map_err(|e| format!("Failed to read {}: {e}", results_path.display()))?;
+        stitch_modern_cpu_batch_outputs(&raw, expected_speakers)
+    })
+    .await
+    .map_err(|e| format!("Modern CPU batch diarization worker failed: {e}"))?
+}
+
 fn resolve_hf_token() -> Option<String> {
     if let Ok(token) = std::env::var("HF_TOKEN") {
         let trimmed = token.trim();
@@ -866,65 +1105,20 @@ pub async fn diarize_audio_chunks_with_modern_cpu(
     audio_chunks: Vec<ExportedChunk>,
     segments: Vec<TranscriptionSegment>,
     expected_speakers: Option<i32>,
-    max_parallel_chunks: usize,
+    _max_parallel_chunks: usize,
 ) -> Result<DiarizedResult, String> {
     if audio_chunks.is_empty() {
         return Err("Modern CPU chunked diarization requires audio chunks".to_string());
     }
 
-    let parallelism = max_parallel_chunks.clamp(1, 4);
-    let source_segments = Arc::new(segments);
-    let chunk_results = stream::iter(audio_chunks.into_iter())
-        .map(|chunk| {
-            let source_segments = source_segments.clone();
-            async move {
-                let chunk_segments = if source_segments.is_empty() {
-                    None
-                } else {
-                    Some(segments_for_chunk(&source_segments, &chunk))
-                };
-                if chunk_segments.as_ref().is_some_and(Vec::is_empty) {
-                    return Ok(None);
-                }
-
-                let local = if let Some(chunk_segments) = chunk_segments {
-                    diarize_audio_with_modern_cpu(
-                        chunk.audio_path.clone(),
-                        &chunk_segments,
-                        expected_speakers,
-                    )
-                    .await?
-                } else {
-                    run_modern_cpu_backend(chunk.audio_path.clone(), expected_speakers).await?
-                };
-                Ok::<Option<(usize, DiarizedResult)>, String>(Some((
-                    chunk.index,
-                    shift_diarized_result(local, chunk.offset_sec),
-                )))
-            }
-        })
-        .buffer_unordered(parallelism)
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, String>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-
-    if chunk_results.is_empty() {
-        return Err("Modern CPU chunked diarization returned no chunk results".to_string());
+    let stitched_turns = run_modern_cpu_backend_batch(audio_chunks, expected_speakers).await?;
+    if segments.is_empty() {
+        return Ok(stitched_turns);
     }
 
-    let mut chunk_results = chunk_results;
-    chunk_results.sort_by_key(|(index, _)| *index);
-    Ok(stitch_diarized_chunk_results_with_expected_speakers(
-        chunk_results
-            .into_iter()
-            .map(|(_, result)| result)
-            .collect(),
-        3.0,
-        expected_speakers,
+    Ok(align_modern_cpu_diarization_to_transcript(
+        stitched_turns,
+        &segments,
     ))
 }
 
@@ -1189,7 +1383,12 @@ pub async fn diarize_audio_by_chunks_with_sherpa(
                 })
                 .await
                 .map_err(|e| format!("Hybrid diarization worker failed: {e}"))?
-                .unwrap_or_else(|_| diarize_transcription_locally(&chunk_segments));
+                .map_err(|e| {
+                    format!(
+                        "Hybrid Sherpa diarization failed for chunk {}: {e}",
+                        chunk.index
+                    )
+                })?;
 
                 local_results.push((
                     chunk.index,
@@ -1220,7 +1419,7 @@ pub async fn diarize_audio_by_chunks_with_sherpa(
     ))
 }
 
-pub async fn diarize_with_mode(
+pub async fn diarize_with_mode_report(
     audio_path: String,
     segments: Vec<TranscriptionSegment>,
     audio_chunks: Option<Vec<ExportedChunk>>,
@@ -1228,45 +1427,200 @@ pub async fn diarize_with_mode(
     expected_speakers: Option<i32>,
     mode: DiarizationMode,
     num_threads: i32,
-) -> Result<DiarizedResult, String> {
+) -> Result<DiarizationRun, String> {
+    let started = Instant::now();
     if mode == DiarizationMode::Fast {
-        return Ok(diarize_transcription_locally(&segments));
+        let result = diarize_transcription_locally(&segments);
+        return Ok(build_diarization_run(
+            mode,
+            DiarizationBackend::FastLocal,
+            None,
+            started,
+            result,
+        ));
     }
     let segments = Arc::new(segments);
 
-    if matches!(
-        mode,
-        DiarizationMode::Auto | DiarizationMode::ModernCpu | DiarizationMode::Precise
-    ) {
-        match diarize_audio_with_modern_cpu(
-            audio_path.clone(),
-            segments.as_ref().as_slice(),
-            expected_speakers,
-        )
-        .await
-        {
-            Ok(result) => return Ok(result),
-            Err(error) if mode == DiarizationMode::ModernCpu => return Err(error),
-            Err(_) => {}
+    match mode {
+        DiarizationMode::ModernCpu => {
+            let result = diarize_audio_with_modern_cpu(
+                audio_path,
+                segments.as_ref().as_slice(),
+                expected_speakers,
+            )
+            .await?;
+            return Ok(build_diarization_run(
+                mode,
+                DiarizationBackend::ModernCpu,
+                None,
+                started,
+                result,
+            ));
+        }
+        DiarizationMode::ModernCpuChunked => {
+            let chunks = audio_chunks.ok_or_else(|| {
+                "Modern CPU chunked diarization requires audio chunks".to_string()
+            })?;
+            if expected_speakers.unwrap_or(0) <= 0 {
+                return Err(
+                    "Modern CPU chunked diarization requires expectedSpeakers for stable labels"
+                        .to_string(),
+                );
+            }
+            let result = diarize_audio_chunks_with_modern_cpu(
+                chunks,
+                segments.as_ref().clone(),
+                expected_speakers,
+                num_threads.max(1) as usize,
+            )
+            .await?;
+            return Ok(build_diarization_run(
+                mode,
+                DiarizationBackend::ModernCpuChunked,
+                None,
+                started,
+                result,
+            ));
+        }
+        DiarizationMode::Pyannote => {
+            let result = diarize_audio_with_pyannote(
+                audio_path,
+                segments.as_ref().clone(),
+                expected_speakers,
+            )
+            .await?;
+            return Ok(build_diarization_run(
+                mode,
+                DiarizationBackend::Pyannote,
+                None,
+                started,
+                result,
+            ));
+        }
+        DiarizationMode::Hybrid => {
+            let chunks = audio_chunks
+                .ok_or_else(|| "Hybrid diarization requires audio chunks".to_string())?;
+            if !chunks_can_use_sherpa(&chunks) {
+                return Err("Hybrid Sherpa diarization requires WAV chunks".to_string());
+            }
+            let result = diarize_audio_by_chunks_with_sherpa(
+                chunks,
+                segments.clone(),
+                assets,
+                expected_speakers,
+                num_threads,
+            )
+            .await?;
+            return Ok(build_diarization_run(
+                mode,
+                DiarizationBackend::SherpaHybrid,
+                None,
+                started,
+                result,
+            ));
+        }
+        DiarizationMode::Precise => {
+            let sherpa_segments = segments.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                diarize_audio_with_sherpa(
+                    audio_path,
+                    sherpa_segments.as_ref().as_slice(),
+                    assets,
+                    expected_speakers,
+                    num_threads,
+                )
+            })
+            .await
+            .map_err(|e| format!("Offline diarization worker failed: {e}"))??;
+            return Ok(build_diarization_run(
+                mode,
+                DiarizationBackend::SherpaPrecise,
+                None,
+                started,
+                result,
+            ));
+        }
+        DiarizationMode::Auto | DiarizationMode::Fast => {}
+    }
+
+    let mut fallback_reasons = Vec::new();
+    match diarize_audio_with_modern_cpu(
+        audio_path.clone(),
+        segments.as_ref().as_slice(),
+        expected_speakers,
+    )
+    .await
+    {
+        Ok(result) => {
+            return Ok(build_diarization_run(
+                mode,
+                DiarizationBackend::ModernCpu,
+                join_fallback_reasons(&fallback_reasons),
+                started,
+                result,
+            ));
+        }
+        Err(error) => {
+            push_fallback_reason(&mut fallback_reasons, DiarizationBackend::ModernCpu, error)
         }
     }
 
-    if matches!(
-        mode,
-        DiarizationMode::Auto | DiarizationMode::Hybrid | DiarizationMode::ModernCpu
-    ) && audio_chunks
-        .as_ref()
-        .map(|chunks| chunks_can_use_sherpa(chunks))
-        .unwrap_or(false)
+    if expected_speakers.unwrap_or(0) > 0 {
+        if let Some(chunks) = audio_chunks.clone().filter(|chunks| chunks.len() > 1) {
+            match diarize_audio_chunks_with_modern_cpu(
+                chunks,
+                segments.as_ref().clone(),
+                expected_speakers,
+                num_threads.max(1) as usize,
+            )
+            .await
+            {
+                Ok(result) => {
+                    return Ok(build_diarization_run(
+                        mode,
+                        DiarizationBackend::ModernCpuChunked,
+                        join_fallback_reasons(&fallback_reasons),
+                        started,
+                        result,
+                    ));
+                }
+                Err(error) => push_fallback_reason(
+                    &mut fallback_reasons,
+                    DiarizationBackend::ModernCpuChunked,
+                    error,
+                ),
+            }
+        }
+    }
+
+    if let Some(chunks) = audio_chunks
+        .clone()
+        .filter(|chunks| chunks_can_use_sherpa(chunks))
     {
-        return diarize_audio_by_chunks_with_sherpa(
-            audio_chunks.unwrap_or_default(),
+        match diarize_audio_by_chunks_with_sherpa(
+            chunks,
             segments.clone(),
-            assets,
+            assets.clone(),
             expected_speakers,
             num_threads,
         )
-        .await;
+        .await
+        {
+            Ok(result) => {
+                return Ok(build_diarization_run(
+                    mode,
+                    DiarizationBackend::SherpaHybrid,
+                    join_fallback_reasons(&fallback_reasons),
+                    started,
+                    result,
+                ));
+            }
+            Err(error) => push_fallback_reason(
+                &mut fallback_reasons,
+                DiarizationBackend::SherpaHybrid,
+                error,
+            ),
+        }
     }
 
     let sherpa_segments = segments.clone();
@@ -1282,8 +1636,53 @@ pub async fn diarize_with_mode(
     .await
     .map_err(|e| format!("Offline diarization worker failed: {e}"))?;
 
-    Ok(sherpa_result
-        .unwrap_or_else(|_| diarize_transcription_locally(segments.as_ref().as_slice())))
+    match sherpa_result {
+        Ok(result) => Ok(build_diarization_run(
+            mode,
+            DiarizationBackend::SherpaPrecise,
+            join_fallback_reasons(&fallback_reasons),
+            started,
+            result,
+        )),
+        Err(error) if mode_allows_local_fallback(mode) => {
+            push_fallback_reason(
+                &mut fallback_reasons,
+                DiarizationBackend::SherpaPrecise,
+                error,
+            );
+            let result = diarize_transcription_locally(segments.as_ref().as_slice());
+            Ok(build_diarization_run(
+                mode,
+                DiarizationBackend::FastLocal,
+                join_fallback_reasons(&fallback_reasons),
+                started,
+                result,
+            ))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub async fn diarize_with_mode(
+    audio_path: String,
+    segments: Vec<TranscriptionSegment>,
+    audio_chunks: Option<Vec<ExportedChunk>>,
+    assets: DiarizationAssetPaths,
+    expected_speakers: Option<i32>,
+    mode: DiarizationMode,
+    num_threads: i32,
+) -> Result<DiarizedResult, String> {
+    Ok(diarize_with_mode_report(
+        audio_path,
+        segments,
+        audio_chunks,
+        assets,
+        expected_speakers,
+        mode,
+        num_threads,
+    )
+    .await?
+    .result)
 }
 
 fn chunk_path_is_wav(chunk: &ExportedChunk) -> bool {
@@ -1746,6 +2145,87 @@ pub fn shift_diarized_result(mut result: DiarizedResult, offset_sec: f64) -> Dia
     result
 }
 
+fn normalized_embedding(embedding: &[f64]) -> Option<Vec<f64>> {
+    let norm = embedding
+        .iter()
+        .map(|value| value * value)
+        .sum::<f64>()
+        .sqrt();
+    if !norm.is_finite() || norm <= f64::EPSILON {
+        return None;
+    }
+
+    Some(embedding.iter().map(|value| value / norm).collect())
+}
+
+fn cosine_similarity(left: &[f64], right: &[f64]) -> Option<f64> {
+    if left.len() != right.len() || left.is_empty() {
+        return None;
+    }
+
+    let left = normalized_embedding(left)?;
+    let right = normalized_embedding(right)?;
+    Some(
+        left.iter()
+            .zip(right.iter())
+            .map(|(left, right)| left * right)
+            .sum(),
+    )
+}
+
+fn best_centroid_match<'a>(
+    local: &SpeakerCentroid,
+    global_centroids: &'a [GlobalSpeakerCentroid],
+    min_cosine: Option<f64>,
+) -> Option<&'a str> {
+    global_centroids
+        .iter()
+        .filter_map(|global| {
+            cosine_similarity(&local.embedding, &global.embedding)
+                .map(|score| (global.speaker.as_str(), score))
+        })
+        .filter(|(_, score)| min_cosine.map(|min| *score >= min).unwrap_or(true))
+        .max_by(|(_, left), (_, right)| {
+            left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(speaker, _)| speaker)
+}
+
+fn upsert_global_centroid(
+    global_centroids: &mut Vec<GlobalSpeakerCentroid>,
+    speaker: &str,
+    local_embedding: &[f64],
+) {
+    let Some(local_embedding) = normalized_embedding(local_embedding) else {
+        return;
+    };
+
+    if let Some(global) = global_centroids
+        .iter_mut()
+        .find(|global| global.speaker == speaker)
+    {
+        if global.embedding.len() != local_embedding.len() {
+            return;
+        }
+        let previous_weight = global.observations.max(1) as f64;
+        for (global_value, local_value) in global.embedding.iter_mut().zip(local_embedding) {
+            *global_value =
+                (*global_value * previous_weight + local_value) / (previous_weight + 1.0);
+        }
+        if let Some(normalized) = normalized_embedding(&global.embedding) {
+            global.embedding = normalized;
+        }
+        global.observations += 1;
+        return;
+    }
+
+    global_centroids.push(GlobalSpeakerCentroid {
+        speaker: speaker.to_string(),
+        embedding: local_embedding,
+        observations: 1,
+    });
+}
+
 fn expected_speaker_name_from_local_label(label: &str, expected_speakers: usize) -> Option<String> {
     if expected_speakers == 0 {
         return None;
@@ -1879,6 +2359,120 @@ fn stitch_diarized_chunk_results_internal(
     DiarizedResult { speakers, segments }
 }
 
+fn stitch_diarized_chunk_results_with_centroids(
+    chunk_results: Vec<DiarizedChunkResult>,
+    overlap_sec: f64,
+    expected_speakers: Option<i32>,
+) -> DiarizedResult {
+    let expected_speakers = expected_speakers
+        .filter(|value| *value > 0)
+        .map(|value| value as usize);
+    let mut speakers = Vec::new();
+    let mut segments: Vec<DiarizedSegment> = Vec::new();
+    let mut global_centroids: Vec<GlobalSpeakerCentroid> = Vec::new();
+
+    for chunk in chunk_results {
+        let has_centroids = !chunk.speaker_centroids.is_empty();
+        let mut local_to_global: HashMap<String, String> = HashMap::new();
+        let mut overlap_scores: HashMap<String, HashMap<String, f64>> = HashMap::new();
+
+        for local in &chunk.diarized.segments {
+            let first_candidate = segments.partition_point(|existing| existing.end <= local.start);
+            for existing in &segments[first_candidate..] {
+                if existing.start >= local.end {
+                    break;
+                }
+                let overlap = overlap_seconds(local.start, local.end, existing.start, existing.end);
+                if overlap <= 0.0 {
+                    continue;
+                }
+                *overlap_scores
+                    .entry(local.speaker.clone())
+                    .or_default()
+                    .entry(existing.speaker.clone())
+                    .or_insert(0.0) += overlap;
+            }
+        }
+
+        for (local_speaker, global_scores) in overlap_scores {
+            if let Some((global_speaker, _)) = global_scores
+                .into_iter()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            {
+                local_to_global.insert(local_speaker, global_speaker);
+            }
+        }
+
+        for centroid in &chunk.speaker_centroids {
+            if local_to_global.contains_key(&centroid.speaker) {
+                continue;
+            }
+
+            let speaker_cap_reached = expected_speakers
+                .map(|expected| speakers.len() >= expected)
+                .unwrap_or(false);
+            let min_cosine = if speaker_cap_reached { None } else { Some(0.72) };
+
+            if let Some(global_speaker) =
+                best_centroid_match(centroid, &global_centroids, min_cosine)
+            {
+                local_to_global.insert(centroid.speaker.clone(), global_speaker.to_string());
+            }
+        }
+
+        for mut segment in chunk.diarized.segments {
+            let original_speaker = segment.speaker.clone();
+            let canonical = local_to_global
+                .get(&original_speaker)
+                .cloned()
+                .or_else(|| {
+                    if has_centroids {
+                        None
+                    } else {
+                        expected_speakers.and_then(|expected| {
+                            expected_speaker_name_from_local_label(&original_speaker, expected)
+                        })
+                    }
+                })
+                .unwrap_or_else(|| {
+                    let speaker = format!("Falante {}", speakers.len() + 1);
+                    local_to_global.insert(original_speaker.clone(), speaker.clone());
+                    speaker
+                });
+            segment.speaker = canonical.clone();
+
+            push_speaker_once(&mut speakers, &canonical);
+            if let Some(last) = segments.last_mut() {
+                if last.speaker == segment.speaker && segment.start <= last.end + overlap_sec {
+                    last.end = last.end.max(segment.end);
+                    let text = segment.text.trim();
+                    if !text.is_empty() && !last.text.contains(text) {
+                        if !last.text.is_empty() {
+                            last.text.push(' ');
+                        }
+                        last.text.push_str(text);
+                    }
+                    continue;
+                }
+            }
+
+            segments.push(segment);
+        }
+
+        for centroid in &chunk.speaker_centroids {
+            if let Some(global_speaker) = local_to_global.get(&centroid.speaker) {
+                upsert_global_centroid(&mut global_centroids, global_speaker, &centroid.embedding);
+            }
+        }
+    }
+
+    if speakers.is_empty() {
+        speakers.push("Falante 1".to_string());
+    }
+
+    DiarizedResult { speakers, segments }
+}
+
 #[command]
 pub async fn diarize_transcription_end_to_end(
     app: tauri::AppHandle,
@@ -1888,77 +2482,36 @@ pub async fn diarize_transcription_end_to_end(
     mode: Option<String>,
     num_threads: Option<i32>,
     expected_speakers: Option<i32>,
-) -> Result<DiarizedResult, String> {
+) -> Result<DiarizedResultWithTelemetry, String> {
+    let started = Instant::now();
     let segments = serde_json::from_str::<Vec<TranscriptionSegment>>(&segments_json)
         .map_err(|e| format!("Failed to parse transcription segments JSON: {e}"))?;
     let mode = DiarizationMode::from_option(mode);
 
     if mode == DiarizationMode::Fast {
-        return Ok(diarize_transcription_locally(&segments));
-    }
-
-    if mode == DiarizationMode::Pyannote {
-        match diarize_audio_with_pyannote(audio_path.clone(), segments.clone(), expected_speakers)
-            .await
-        {
-            Ok(result) => return Ok(result),
-            Err(error) => return Err(error),
-        }
-    }
-
-    if mode == DiarizationMode::ModernCpuChunked {
-        let chunks = audio_chunks
-            .clone()
-            .ok_or_else(|| "Modern CPU chunked diarization requires audio chunks".to_string())?;
-        let num_threads =
-            normalize_diarization_threads(num_threads, available_parallelism_count()) as usize;
-        return diarize_audio_chunks_with_modern_cpu(
-            chunks,
-            segments,
-            expected_speakers,
-            num_threads,
+        let result = diarize_transcription_locally(&segments);
+        return Ok(build_diarization_run(
+            mode,
+            DiarizationBackend::FastLocal,
+            None,
+            started,
+            result,
         )
-        .await;
+        .into());
     }
 
-    if matches!(mode, DiarizationMode::Auto | DiarizationMode::Precise)
-        && expected_speakers.unwrap_or(0) > 0
-    {
-        if let Some(chunks) = audio_chunks.clone() {
-            let num_threads =
-                normalize_diarization_threads(num_threads, available_parallelism_count()) as usize;
-            if let Ok(result) = diarize_audio_chunks_with_modern_cpu(
-                chunks,
-                segments.clone(),
-                expected_speakers,
-                num_threads,
-            )
-            .await
-            {
-                return Ok(result);
-            }
-        }
-    }
-
-    if matches!(
-        mode,
-        DiarizationMode::Auto | DiarizationMode::ModernCpu | DiarizationMode::Precise
-    ) {
-        match diarize_audio_with_modern_cpu(audio_path.clone(), &segments, expected_speakers).await
-        {
-            Ok(result) => return Ok(result),
-            Err(error) if mode == DiarizationMode::ModernCpu => return Err(error),
-            Err(_) => {}
-        }
-    }
-
-    let assets = match ensure_diarization_assets(&app).await {
-        Ok(paths) => paths,
-        Err(_) => return Ok(diarize_transcription_locally(&segments)),
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app data directory: {e}"))?;
+    let assets = if matches!(mode, DiarizationMode::Hybrid | DiarizationMode::Precise) {
+        ensure_diarization_assets_in_dir(&app_data_dir).await?
+    } else {
+        diarization_asset_paths(&app_data_dir)
     };
 
     let num_threads = normalize_diarization_threads(num_threads, available_parallelism_count());
-    diarize_with_mode(
+    let run = match diarize_with_mode_report(
         audio_path,
         segments,
         audio_chunks,
@@ -1968,6 +2521,24 @@ pub async fn diarize_transcription_end_to_end(
         num_threads,
     )
     .await
+    {
+        Ok(run) => run,
+        Err(error) if mode_allows_local_fallback(mode) => {
+            let segments = serde_json::from_str::<Vec<TranscriptionSegment>>(&segments_json)
+                .map_err(|e| format!("Failed to parse transcription segments JSON: {e}"))?;
+            let result = diarize_transcription_locally(&segments);
+            build_diarization_run(
+                mode,
+                DiarizationBackend::FastLocal,
+                Some(error),
+                started,
+                result,
+            )
+        }
+        Err(error) => return Err(error),
+    };
+
+    Ok(run.into())
 }
 
 #[command]
@@ -2581,6 +3152,48 @@ mod tests {
     }
 
     #[test]
+    fn explicit_diarization_modes_do_not_allow_local_fallback() {
+        assert!(mode_allows_local_fallback(DiarizationMode::Auto));
+        assert!(!mode_allows_local_fallback(DiarizationMode::Fast));
+        assert!(!mode_allows_local_fallback(DiarizationMode::Hybrid));
+        assert!(!mode_allows_local_fallback(DiarizationMode::ModernCpu));
+        assert!(!mode_allows_local_fallback(
+            DiarizationMode::ModernCpuChunked
+        ));
+        assert!(!mode_allows_local_fallback(DiarizationMode::Precise));
+        assert!(!mode_allows_local_fallback(DiarizationMode::Pyannote));
+    }
+
+    #[test]
+    fn diarization_telemetry_records_backend_and_counts() {
+        let result = DiarizedResult {
+            speakers: vec!["Falante 1".to_string(), "Falante 2".to_string()],
+            segments: vec![DiarizedSegment {
+                speaker: "Falante 1".to_string(),
+                start: 0.0,
+                end: 1.0,
+                text: "ola".to_string(),
+            }],
+        };
+
+        let telemetry = build_diarization_telemetry(
+            DiarizationMode::Precise,
+            DiarizationBackend::SherpaPrecise,
+            Some("modern CPU backend unavailable".to_string()),
+            12.5,
+            &result,
+        );
+        let json = serde_json::to_value(&telemetry).unwrap();
+
+        assert_eq!(json["requestedMode"], "precise");
+        assert_eq!(json["backendUsed"], "sherpa-precise");
+        assert_eq!(json["fallbackReason"], "modern CPU backend unavailable");
+        assert_eq!(json["wallClockSec"], 12.5);
+        assert_eq!(json["speakerCount"], 2);
+        assert_eq!(json["segmentCount"], 1);
+    }
+
+    #[test]
     fn shifted_segments_for_chunk_use_chunk_relative_time() {
         let chunk = ExportedChunk {
             index: 1,
@@ -2752,6 +3365,103 @@ mod tests {
         assert_eq!(stitched.segments.len(), 4);
         assert_eq!(stitched.segments[2].speaker, "Falante 1");
         assert_eq!(stitched.segments[3].speaker, "Falante 2");
+    }
+
+    #[test]
+    fn modern_cpu_batch_centroids_map_local_labels_across_chunks() {
+        let raw = r#"[
+            {
+                "index": 0,
+                "offsetSec": 0.0,
+                "diarized": {
+                    "speakers": ["Falante 1"],
+                    "segments": [{"speaker": "Falante 1", "start": 0.0, "end": 5.0, "text": ""}]
+                },
+                "speakerCentroids": [
+                    {"speaker": "Falante 1", "embedding": [1.0, 0.0]}
+                ]
+            },
+            {
+                "index": 1,
+                "offsetSec": 100.0,
+                "diarized": {
+                    "speakers": ["Falante 2"],
+                    "segments": [{"speaker": "Falante 2", "start": 1.0, "end": 6.0, "text": ""}]
+                },
+                "speakerCentroids": [
+                    {"speaker": "Falante 2", "embedding": [0.98, 0.02]}
+                ]
+            }
+        ]"#;
+
+        let stitched = stitch_modern_cpu_batch_outputs(raw, Some(2)).unwrap();
+
+        assert_eq!(stitched.speakers, vec!["Falante 1"]);
+        assert_eq!(stitched.segments.len(), 2);
+        assert_eq!(stitched.segments[1].speaker, "Falante 1");
+        assert_eq!(stitched.segments[1].start, 101.0);
+    }
+
+    #[test]
+    fn modern_cpu_batch_centroids_respect_expected_speaker_cap() {
+        let raw = r#"[
+            {
+                "index": 0,
+                "offsetSec": 0.0,
+                "diarized": {
+                    "speakers": ["Falante 1"],
+                    "segments": [{"speaker": "Falante 1", "start": 0.0, "end": 5.0, "text": ""}]
+                },
+                "speakerCentroids": [
+                    {"speaker": "Falante 1", "embedding": [1.0, 0.0]}
+                ]
+            },
+            {
+                "index": 1,
+                "offsetSec": 100.0,
+                "diarized": {
+                    "speakers": ["Falante 2"],
+                    "segments": [{"speaker": "Falante 2", "start": 1.0, "end": 6.0, "text": ""}]
+                },
+                "speakerCentroids": [
+                    {"speaker": "Falante 2", "embedding": [0.5, 0.5]}
+                ]
+            }
+        ]"#;
+
+        let stitched = stitch_modern_cpu_batch_outputs(raw, Some(1)).unwrap();
+
+        assert_eq!(stitched.speakers, vec!["Falante 1"]);
+        assert_eq!(stitched.segments[1].speaker, "Falante 1");
+    }
+
+    #[test]
+    fn modern_cpu_batch_outputs_are_shifted_and_stitched() {
+        let raw = r#"[
+            {
+                "index": 0,
+                "offsetSec": 0.0,
+                "diarized": {
+                    "speakers": ["Falante 1"],
+                    "segments": [{"speaker": "Falante 1", "start": 0.0, "end": 5.0, "text": ""}]
+                }
+            },
+            {
+                "index": 1,
+                "offsetSec": 100.0,
+                "diarized": {
+                    "speakers": ["Falante 2"],
+                    "segments": [{"speaker": "Falante 2", "start": 1.0, "end": 6.0, "text": ""}]
+                }
+            }
+        ]"#;
+
+        let stitched = stitch_modern_cpu_batch_outputs(raw, Some(2)).unwrap();
+
+        assert_eq!(stitched.speakers, vec!["Falante 1", "Falante 2"]);
+        assert_eq!(stitched.segments[1].speaker, "Falante 2");
+        assert_eq!(stitched.segments[1].start, 101.0);
+        assert_eq!(stitched.segments[1].end, 106.0);
     }
 
     #[test]

@@ -191,6 +191,8 @@ Resultados reais no AMI `ES2002a`, audio de `1272.64s`, CPU Intel i5-13500T, sem
 | app `modern-cpu` | Rust runner, `num_speakers=4` | 103.50s | 0.081 | 12.30x | 14.6 min |
 | app `modern-cpu` | rodada atual, `num_speakers=4` | 120.25s | 0.094 | 10.58x | 17.0 min |
 | app `modern-cpu-chunked` | normalizado por `expected_speakers=4`, 2 chunks em paralelo | 85.12s | 0.067 | 14.95x | 12.0 min |
+| app `modern-cpu` | backend customizado reutilizando WeSpeaker, `num_speakers=4` | 65.83s | 0.052 | 19.33x | 9.3 min |
+| app `modern-cpu-chunked` | batch corrigido + centroid stitch, `expected_speakers=4` | 78.18s | 0.061 | 16.28x | 11.1 min |
 | pyannote Community-1 | CPU Windows, `num_speakers=4` | 1233.89s | 0.970 | 1.03x | 174.5 min |
 | diarize CPU | auto speaker count | 116.00s | 0.091 | 10.97x | 16.4 min |
 
@@ -201,6 +203,8 @@ Observacoes:
 - O modo `auto` do app tenta usar o backend `modern-cpu` quando `.venv-diarize` e `scripts/diarize_cpu_backend.py` existem; se nao houver backend, cai para Sherpa/local. O modo explicito `modern-cpu` falha com erro claro se o backend nao estiver instalado.
 - Esses numeros medem velocidade e contagem de falantes/segmentos. Precisao real ainda precisa de DER com anotacoes temporais do AMI.
 - `modern-cpu-chunked` primeiro foi mais rapido, mas ficou com `12` falantes no AMI `ES2002a` contra `4` esperados. Depois da normalizacao por `expected_speakers`, passou no gate: `85.12s`, `14.95x`, `4` falantes e `102` segmentos. O app usa esse caminho apenas quando ha numero esperado de falantes; caso contrario ou se falhar, cai para `modern-cpu` inteiro.
+- A rodada de 2026-05-21 corrigiu o bug do resumo batch, adicionou matching por centroide e trocou o motor Python para reutilizar a instancia `wespeakerruntime.Speaker`. Com isso, o `modern-cpu` inteiro ficou mais rapido que o chunked no AMI `ES2002a`; o modo `auto` deve preferir `modern-cpu` e deixar `modern-cpu-chunked` para modo explicito/perfil de precisao.
+- O setup CPU fixa `torch==2.8.0` e `torchaudio==2.8.0` em `scripts/requirements-diarize-cpu.txt`. O backend registra aviso em relatorio se detectar `torchaudio>=2.9`, porque `silero-vad` ainda usa `torchaudio.sox_effects`.
 - Pyannote Community-1 foi validado com token Hugging Face liberado, mas no CPU Windows desta maquina ficou praticamente em tempo real: `1233.89s` para `1272.64s` de audio. Isso e `10.26x` mais lento que o `modern-cpu` nesta mesma amostra. Portanto, pyannote deve ficar como backend experimental/benchmark explicito, nao como padrao do modo Precisao.
 
 Benchmark integrado via Rust:
@@ -225,6 +229,7 @@ Resultado:
 | --- | ---: | ---: | ---: | ---: | --- |
 | baseline anterior | 387.90s | 0.305 | 3.28x | n/a | fluxo linear medido antes |
 | adaptativo | 118.45s | 0.093 | 10.74x | 4 | diarizacao e fatos sobrepostos |
+| adaptativo + backend reutilizado | 85.57s | 0.067 | 14.87x | 4 | `modern-cpu`, WeSpeaker reutilizado |
 | adaptativo + segunda passada moderna | 150.85s | 0.119 | 8.44x | 4 | 1 subjanela suspeita reprocessada |
 | adaptativo + Sherpa seletivo | 445.82s | 0.350 | 2.85x | 4 | rejeitado: custo alto mesmo em 1 chunk |
 
@@ -240,6 +245,17 @@ Tempos do run adaptativo:
 | generate_minutes | 17.71s |
 
 Os tempos `diarize_speculative` e `extract_facts_parallel` se sobrepoem; por isso a soma das etapas e maior que o wall-clock total.
+
+Run `ami-es2002a-adaptive-centroid-reuse` de 2026-05-21:
+
+| Etapa | Tempo |
+| --- | ---: |
+| extract_audio | 1.19s |
+| create_smart_chunks | 0.74s |
+| transcribe | 4.97s |
+| diarize_speculative | 66.82s |
+| extract_facts_parallel | 61.84s |
+| generate_minutes | 16.82s |
 
 Conclusao pratica:
 

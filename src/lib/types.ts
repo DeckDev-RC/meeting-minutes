@@ -49,6 +49,14 @@ export interface DiarizedSegment {
 export interface DiarizedResult {
   speakers: string[];
   segments: DiarizedSegment[];
+  telemetry?: {
+    requestedMode: string;
+    backendUsed: string;
+    fallbackReason?: string;
+    wallClockSec: number;
+    speakerCount: number;
+    segmentCount: number;
+  };
 }
 
 export interface SpeakerTurn {

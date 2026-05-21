@@ -1,10 +1,10 @@
 use meeting_minutes_lib::benchmark::compute_benchmark_speed;
 use meeting_minutes_lib::commands::diarize::{
-    diarization_asset_paths, diarize_transcription_locally, diarize_with_mode,
+    diarization_asset_paths, diarization_mode_label, diarize_with_mode_report,
     ensure_diarization_assets_in_dir, normalize_diarization_threads, DiarizationMode,
 };
 use meeting_minutes_lib::models::audio::ExportedChunk;
-use meeting_minutes_lib::models::transcription::{DiarizedResult, TranscriptionSegment};
+use meeting_minutes_lib::models::transcription::TranscriptionSegment;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -25,10 +25,14 @@ struct CliOptions {
 #[serde(rename_all = "camelCase")]
 struct DiarizationBenchmarkReport {
     mode: String,
+    requested_mode: String,
+    backend_used: String,
+    fallback_reason: Option<String>,
     threads: i32,
     audio_path: String,
     audio_duration_sec: f64,
     wall_clock_sec: f64,
+    diarization_wall_clock_sec: f64,
     realtime_factor: f64,
     speed_x: f64,
     projected_three_hour_sec: f64,
@@ -53,18 +57,6 @@ fn default_app_data_dir() -> Result<PathBuf, String> {
 
 fn parse_optional_i32(value: Option<String>) -> Option<i32> {
     value.and_then(|value| value.parse::<i32>().ok())
-}
-
-fn mode_label(mode: DiarizationMode) -> &'static str {
-    match mode {
-        DiarizationMode::Auto => "auto",
-        DiarizationMode::Fast => "fast",
-        DiarizationMode::Hybrid => "hybrid",
-        DiarizationMode::ModernCpu => "modern-cpu",
-        DiarizationMode::ModernCpuChunked => "modern-cpu-chunked",
-        DiarizationMode::Precise => "precise",
-        DiarizationMode::Pyannote => "pyannote",
-    }
 }
 
 fn parse_cli() -> Result<CliOptions, String> {
@@ -139,37 +131,37 @@ async fn main() -> Result<(), String> {
 
     eprintln!(
         "[diarization-benchmark] mode={} threads={} chunks={} segments={}",
-        mode_label(options.mode),
+        diarization_mode_label(options.mode),
         options.threads,
         chunks.len(),
         segments.len()
     );
 
     let started = Instant::now();
-    let diarized: DiarizedResult = if options.mode == DiarizationMode::Fast {
-        diarize_transcription_locally(&segments)
+    let assets = if matches!(
+        options.mode,
+        DiarizationMode::Fast
+            | DiarizationMode::Auto
+            | DiarizationMode::ModernCpu
+            | DiarizationMode::ModernCpuChunked
+            | DiarizationMode::Pyannote
+    ) {
+        diarization_asset_paths(&options.app_data_dir)
     } else {
-        let assets = if matches!(
-            options.mode,
-            DiarizationMode::ModernCpu
-                | DiarizationMode::ModernCpuChunked
-                | DiarizationMode::Pyannote
-        ) {
-            diarization_asset_paths(&options.app_data_dir)
-        } else {
-            ensure_diarization_assets_in_dir(&options.app_data_dir).await?
-        };
-        diarize_with_mode(
-            options.audio.to_string_lossy().to_string(),
-            segments.clone(),
-            Some(chunks.clone()),
-            assets,
-            options.expected_speakers,
-            options.mode,
-            options.threads,
-        )
-        .await?
+        ensure_diarization_assets_in_dir(&options.app_data_dir).await?
     };
+    let run = diarize_with_mode_report(
+        options.audio.to_string_lossy().to_string(),
+        segments.clone(),
+        Some(chunks.clone()),
+        assets,
+        options.expected_speakers,
+        options.mode,
+        options.threads,
+    )
+    .await?;
+    let diarized = run.result;
+    let telemetry = run.telemetry;
     let wall_clock_sec = started.elapsed().as_secs_f64();
     let speed = compute_benchmark_speed(audio_duration_sec, wall_clock_sec)?;
     let projected_three_hour_sec = 10_800.0 * speed.realtime_factor;
@@ -179,11 +171,15 @@ async fn main() -> Result<(), String> {
     write_json(&diarized_path, &diarized)?;
 
     let report = DiarizationBenchmarkReport {
-        mode: mode_label(options.mode).to_string(),
+        mode: diarization_mode_label(options.mode).to_string(),
+        requested_mode: telemetry.requested_mode,
+        backend_used: telemetry.backend_used,
+        fallback_reason: telemetry.fallback_reason,
         threads: options.threads,
         audio_path: options.audio.to_string_lossy().to_string(),
         audio_duration_sec,
         wall_clock_sec,
+        diarization_wall_clock_sec: telemetry.wall_clock_sec,
         realtime_factor: speed.realtime_factor,
         speed_x: speed.speed_x,
         projected_three_hour_sec,

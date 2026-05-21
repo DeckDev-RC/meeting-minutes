@@ -15,7 +15,7 @@
     "benchmark:text": "node scripts/runTextBenchmark.mjs",
     "benchmark:audio-prepare": "cargo run --manifest-path src-tauri/Cargo.toml --bin audio_prepare_benchmark --",
     "benchmark:chunks": "cargo run --manifest-path src-tauri/Cargo.toml --bin chunk_export_benchmark --",
-    "setup:diarize-cpu": "python -m venv .venv-diarize && .venv-diarize\\\\Scripts\\\\python.exe -m pip install --upgrade pip && .venv-diarize\\\\Scripts\\\\python.exe -m pip install diarize==0.1.2",
+    "setup:diarize-cpu": "python -m venv .venv-diarize && .venv-diarize\\\\Scripts\\\\python.exe -m pip install --upgrade pip && .venv-diarize\\\\Scripts\\\\python.exe -m pip install -r scripts\\\\requirements-diarize-cpu.txt",
     "benchmark:diarize-cpu": ".venv-diarize\\\\Scripts\\\\python.exe scripts\\\\diarize_cpu_backend.py",
     "compare:diarization": "node scripts/compareDiarizationBenchmarks.mjs",
     "check:pyannote": "powershell -ExecutionPolicy Bypass -File scripts\\\\check_hf_pyannote_access.ps1",

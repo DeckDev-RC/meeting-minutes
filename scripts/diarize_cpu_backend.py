@@ -1,5 +1,8 @@
 import json
 import argparse
+import importlib.metadata
+import os
+import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,6 +30,39 @@ def segment_to_dict(segment):
     }
 
 
+def normalize_embedding(values):
+    return [float(value) for value in values]
+
+
+def speaker_centroids_to_list(value):
+    if not value:
+        return []
+
+    if isinstance(value, dict):
+        items = value.items()
+    else:
+        items = (
+            (item.get("speaker"), item.get("embedding"))
+            for item in value
+            if isinstance(item, dict)
+        )
+
+    centroids = []
+    for speaker, embedding in items:
+        if embedding is None:
+            continue
+        normalized = normalize_embedding(embedding)
+        if not normalized:
+            continue
+        centroids.append(
+            {
+                "speaker": normalize_speaker_name(speaker),
+                "embedding": normalized,
+            }
+        )
+    return centroids
+
+
 def build_payload(result, backend, model, audio_path, wall_clock_sec):
     segments = [segment_to_dict(segment) for segment in getattr(result, "segments", [])]
     speakers = []
@@ -34,7 +70,7 @@ def build_payload(result, backend, model, audio_path, wall_clock_sec):
         if segment["speaker"] not in speakers:
             speakers.append(segment["speaker"])
 
-    return {
+    payload = {
         "backend": backend,
         "model": model,
         "audioPath": audio_path,
@@ -43,17 +79,13 @@ def build_payload(result, backend, model, audio_path, wall_clock_sec):
         "speakers": speakers or ["Falante 1"],
         "segments": segments,
     }
+    speaker_centroids = speaker_centroids_to_list(getattr(result, "speaker_centroids", None))
+    if speaker_centroids:
+        payload["speakerCentroids"] = speaker_centroids
+    return payload
 
 
-def run_backend(audio_path, output_dir, num_speakers=None, min_speakers=None, max_speakers=None):
-    try:
-        from diarize import diarize
-    except Exception as exc:
-        raise RuntimeError(
-            "Python package 'diarize' is not installed. "
-            "Install it in the selected environment with: python -m pip install diarize"
-        ) from exc
-
+def backend_kwargs(num_speakers=None, min_speakers=None, max_speakers=None):
     kwargs = {}
     if num_speakers is not None:
         kwargs["num_speakers"] = num_speakers
@@ -61,17 +93,233 @@ def run_backend(audio_path, output_dir, num_speakers=None, min_speakers=None, ma
         kwargs["min_speakers"] = min_speakers
     if max_speakers is not None:
         kwargs["max_speakers"] = max_speakers
+    return kwargs
 
+
+def parse_major_minor(version):
+    parts = []
+    for raw in str(version).split(".")[:2]:
+        digits = "".join(ch for ch in raw if ch.isdigit())
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts) if len(parts) == 2 else None
+
+
+def dependency_warnings(versions=None):
+    if versions is None:
+        versions = {}
+        for package in ["torch", "torchaudio", "diarize", "silero-vad", "wespeakerruntime"]:
+            try:
+                versions[package] = importlib.metadata.version(package)
+            except importlib.metadata.PackageNotFoundError:
+                continue
+
+    warnings = []
+    torchaudio_version = versions.get("torchaudio")
+    if torchaudio_version:
+        parsed = parse_major_minor(torchaudio_version)
+        if parsed is not None and parsed >= (2, 9):
+            warnings.append(
+                "torchaudio>=2.9 may remove sox_effects used by silero-vad; "
+                "pin torch/torchaudio to 2.8.x or migrate audio loading."
+            )
+    return warnings
+
+
+def _normalize_rows(values):
+    import numpy as np
+
+    values = np.asarray(values, dtype=float)
+    norms = np.linalg.norm(values, axis=1, keepdims=True)
+    return np.divide(values, norms, out=np.zeros_like(values), where=norms > 0)
+
+
+def build_speaker_centroids(embeddings, labels):
+    import numpy as np
+
+    if len(embeddings) == 0 or len(embeddings) != len(labels):
+        return {}
+
+    normalized = _normalize_rows(embeddings)
+    centroids = {}
+    for label in sorted({int(label) for label in labels}):
+        members = normalized[labels == label]
+        if len(members) == 0:
+            continue
+        centroid = _normalize_rows(members.mean(axis=0, keepdims=True))[0]
+        if np.any(centroid):
+            centroids[f"SPEAKER_{label:02d}"] = centroid.tolist()
+    return centroids
+
+
+class ReusableDiarizeEngine:
+    def __init__(self, speaker_factory=None):
+        self._speaker_factory = speaker_factory
+        self._speaker = None
+
+    @property
+    def speaker(self):
+        if self._speaker is None:
+            if self._speaker_factory is not None:
+                self._speaker = self._speaker_factory()
+            else:
+                import wespeakerruntime as wespeaker_rt
+
+                self._speaker = wespeaker_rt.Speaker(lang="en")
+        return self._speaker
+
+    def __call__(self, audio_path, **kwargs):
+        return self.diarize(audio_path, **kwargs)
+
+    def extract_embeddings(self, audio_path, speech_segments):
+        import numpy as np
+        import soundfile as sf
+        from diarize.embeddings import EMBEDDING_STEP, EMBEDDING_WINDOW, MIN_SEGMENT_DURATION
+        from diarize.utils import SubSegment
+
+        audio_data, sample_rate = sf.read(str(audio_path))
+        if audio_data.ndim > 1:
+            audio_data = audio_data.mean(axis=1)
+
+        embeddings = []
+        subsegments = []
+
+        for index, segment in enumerate(speech_segments):
+            if segment.duration < MIN_SEGMENT_DURATION:
+                continue
+
+            if segment.duration <= EMBEDDING_WINDOW * 1.5:
+                windows = [(segment.start, segment.end)]
+            else:
+                windows = []
+                window_start = segment.start
+                while window_start + MIN_SEGMENT_DURATION < segment.end:
+                    window_end = min(window_start + EMBEDDING_WINDOW, segment.end)
+                    windows.append((window_start, window_end))
+                    window_start += EMBEDDING_STEP
+
+            for window_start, window_end in windows:
+                start_sample = int(window_start * sample_rate)
+                end_sample = int(window_end * sample_rate)
+                segment_audio = audio_data[start_sample:end_sample]
+
+                tmp_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                        tmp_path = tmp.name
+                        sf.write(tmp_path, segment_audio, sample_rate)
+                    embedding = self.speaker.extract_embedding(tmp_path)
+                except Exception:
+                    continue
+                finally:
+                    if tmp_path is not None:
+                        try:
+                            os.unlink(tmp_path)
+                        except OSError:
+                            pass
+
+                if embedding is not None:
+                    embedding = np.asarray(embedding)
+                    if embedding.ndim == 2:
+                        embedding = embedding[0]
+                    embeddings.append(embedding)
+                    subsegments.append(
+                        SubSegment(start=window_start, end=window_end, parent_idx=index)
+                    )
+
+        if not embeddings:
+            return np.empty((0, 256), dtype=np.float32), []
+        return np.stack(embeddings), subsegments
+
+    def diarize(
+        self,
+        audio_path,
+        *,
+        min_speakers=1,
+        max_speakers=20,
+        num_speakers=None,
+    ):
+        from diarize import _build_diarization_segments
+        from diarize.clustering import cluster_speakers
+        from diarize.utils import get_audio_duration
+        from diarize.vad import run_vad
+
+        if min_speakers < 1:
+            raise ValueError(f"min_speakers must be >= 1, got {min_speakers}")
+        if max_speakers < min_speakers:
+            raise ValueError(
+                f"max_speakers ({max_speakers}) must be >= min_speakers ({min_speakers})"
+            )
+        if num_speakers is not None and num_speakers < 1:
+            raise ValueError(f"num_speakers must be >= 1, got {num_speakers}")
+
+        audio_path = str(audio_path)
+        duration = get_audio_duration(audio_path)
+        speech_segments = run_vad(audio_path)
+        if not speech_segments:
+            return SimpleNamespace(audio_duration=duration, segments=[], speaker_centroids={})
+
+        embeddings, subsegments = self.extract_embeddings(audio_path, speech_segments)
+        if len(embeddings) == 0:
+            return SimpleNamespace(audio_duration=duration, segments=[], speaker_centroids={})
+
+        labels, _estimation_details = cluster_speakers(
+            embeddings,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+            num_speakers=num_speakers,
+        )
+        segments = _build_diarization_segments(
+            speech_segments,
+            subsegments,
+            labels,
+            embeddings,
+        )
+        return SimpleNamespace(
+            audio_duration=duration,
+            segments=segments,
+            speaker_centroids=build_speaker_centroids(embeddings, labels),
+        )
+
+
+def load_diarize_function():
+    try:
+        import diarize  # noqa: F401
+    except Exception as exc:
+        raise RuntimeError(
+            "Python package 'diarize' is not installed. "
+            "Install it in the selected environment with: python -m pip install diarize"
+        ) from exc
+    return ReusableDiarizeEngine()
+
+
+def build_payload_with_diarize(diarize_fn, audio_path, kwargs):
     started = time.perf_counter()
-    result = diarize(str(audio_path), **kwargs)
+    result = diarize_fn(str(audio_path), **kwargs)
     wall_clock_sec = time.perf_counter() - started
 
-    payload = build_payload(
+    return build_payload(
         result,
         backend="diarize",
         model="diarize-0.1.2",
         audio_path=str(audio_path),
         wall_clock_sec=wall_clock_sec,
+    )
+
+
+def run_backend_with_diarize(
+    diarize_fn,
+    audio_path,
+    output_dir,
+    num_speakers=None,
+    min_speakers=None,
+    max_speakers=None,
+):
+    payload = build_payload_with_diarize(
+        diarize_fn,
+        audio_path,
+        backend_kwargs(num_speakers, min_speakers, max_speakers),
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -98,19 +346,136 @@ def run_backend(audio_path, output_dir, num_speakers=None, min_speakers=None, ma
         ),
         "outputFiles": [str(report_path), str(diarized_path)],
     }
+    warnings = dependency_warnings()
+    if warnings:
+        report["dependencyWarnings"] = warnings
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return report
 
 
+def run_backend(audio_path, output_dir, num_speakers=None, min_speakers=None, max_speakers=None):
+    return run_backend_with_diarize(
+        load_diarize_function(),
+        audio_path,
+        output_dir,
+        num_speakers=num_speakers,
+        min_speakers=min_speakers,
+        max_speakers=max_speakers,
+    )
+
+
+def chunk_value(chunk, *names, default=None):
+    for name in names:
+        if name in chunk:
+            return chunk[name]
+    return default
+
+
+def run_backend_batch_with_diarize(
+    diarize_fn,
+    chunks,
+    output_dir,
+    num_speakers=None,
+    min_speakers=None,
+    max_speakers=None,
+):
+    kwargs = backend_kwargs(num_speakers, min_speakers, max_speakers)
+    started = time.perf_counter()
+    chunk_outputs = []
+
+    for fallback_index, chunk in enumerate(chunks):
+        audio_path = chunk_value(chunk, "audioPath", "audio_path")
+        if not audio_path:
+            raise RuntimeError(f"Chunk {fallback_index} is missing audioPath")
+        index = int(chunk_value(chunk, "index", default=fallback_index))
+        payload = build_payload_with_diarize(diarize_fn, audio_path, kwargs)
+        chunk_output = {
+            "index": index,
+            "audioPath": audio_path,
+            "offsetSec": float(chunk_value(chunk, "offsetSec", "offset_sec", default=0.0) or 0.0),
+            "diarized": {
+                "speakers": payload["speakers"],
+                "segments": payload["segments"],
+            },
+            "report": payload,
+        }
+        if payload.get("speakerCentroids"):
+            chunk_output["speakerCentroids"] = payload["speakerCentroids"]
+        chunk_outputs.append(chunk_output)
+
+    wall_clock_sec = time.perf_counter() - started
+    output_dir.mkdir(parents=True, exist_ok=True)
+    chunks_path = output_dir / "chunk-diarized-results.json"
+    report_path = output_dir / "diarize-batch-backend-report.json"
+    chunks_path.write_text(json.dumps(chunk_outputs, ensure_ascii=False, indent=2), encoding="utf-8")
+    audio_duration_sec = sum(float(chunk["report"].get("audioDurationSec") or 0.0) for chunk in chunk_outputs)
+    speakers = []
+    segment_count = 0
+    for chunk in chunk_outputs:
+        for speaker in chunk["diarized"]["speakers"]:
+            if speaker not in speakers:
+                speakers.append(speaker)
+        segment_count += len(chunk["diarized"]["segments"])
+    report = {
+        "backend": "diarize",
+        "model": "diarize-0.1.2",
+        "chunkCount": len(chunk_outputs),
+        "audioDurationSec": audio_duration_sec,
+        "wallClockSec": wall_clock_sec,
+        "speakerCount": len(speakers) or 1,
+        "segmentCount": segment_count,
+        "realtimeFactor": (
+            wall_clock_sec / audio_duration_sec if audio_duration_sec > 0 else None
+        ),
+        "speedX": (
+            audio_duration_sec / wall_clock_sec if wall_clock_sec > 0 else None
+        ),
+        "outputFiles": [str(report_path), str(chunks_path)],
+    }
+    warnings = dependency_warnings()
+    if warnings:
+        report["dependencyWarnings"] = warnings
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return report
+
+
+def run_backend_batch(chunks_path, output_dir, num_speakers=None, min_speakers=None, max_speakers=None):
+    chunks = json.loads(Path(chunks_path).read_text(encoding="utf-8"))
+    if not isinstance(chunks, list):
+        raise RuntimeError("--chunks-json must contain a JSON array")
+    return run_backend_batch_with_diarize(
+        load_diarize_function(),
+        chunks,
+        output_dir,
+        num_speakers=num_speakers,
+        min_speakers=min_speakers,
+        max_speakers=max_speakers,
+    )
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Run CPU-only diarize backend benchmark.")
-    parser.add_argument("--audio", required=True, help="Audio file path")
+    parser.add_argument("--audio", help="Audio file path")
+    parser.add_argument("--chunks-json", help="JSON file with chunk metadata for one-process batch mode")
     parser.add_argument("--out-dir", required=True, help="Output directory")
     parser.add_argument("--num-speakers", type=int)
     parser.add_argument("--min-speakers", type=int)
     parser.add_argument("--max-speakers", type=int)
     parser.add_argument("--json", action="store_true", help="Print the full JSON report.")
     return parser.parse_args()
+
+
+def compact_report(report):
+    return {
+        "backend": report["backend"],
+        "model": report["model"],
+        "wallClockSec": report["wallClockSec"],
+        "realtimeFactor": report.get("realtimeFactor"),
+        "speedX": report.get("speedX"),
+        "speakerCount": report.get("speakerCount"),
+        "segmentCount": report.get("segmentCount"),
+        "outputFiles": report["outputFiles"],
+    }
 
 
 def _test_build_payload():
@@ -132,28 +497,25 @@ def _test_build_payload():
 
 if __name__ == "__main__":
     args = parse_args()
-    report = run_backend(
-        Path(args.audio),
-        Path(args.out_dir),
-        num_speakers=args.num_speakers,
-        min_speakers=args.min_speakers,
-        max_speakers=args.max_speakers,
-    )
+    if args.chunks_json:
+        report = run_backend_batch(
+            Path(args.chunks_json),
+            Path(args.out_dir),
+            num_speakers=args.num_speakers,
+            min_speakers=args.min_speakers,
+            max_speakers=args.max_speakers,
+        )
+    else:
+        if not args.audio:
+            raise SystemExit("--audio is required unless --chunks-json is used")
+        report = run_backend(
+            Path(args.audio),
+            Path(args.out_dir),
+            num_speakers=args.num_speakers,
+            min_speakers=args.min_speakers,
+            max_speakers=args.max_speakers,
+        )
     if args.json:
         print(json.dumps(report, ensure_ascii=False))
     else:
-        print(
-            json.dumps(
-                {
-                    "backend": report["backend"],
-                    "model": report["model"],
-                    "wallClockSec": report["wallClockSec"],
-                    "realtimeFactor": report["realtimeFactor"],
-                    "speedX": report["speedX"],
-                    "speakerCount": report["speakerCount"],
-                    "segmentCount": report["segmentCount"],
-                    "outputFiles": report["outputFiles"],
-                },
-                ensure_ascii=False,
-            )
-        )
+        print(json.dumps(compact_report(report), ensure_ascii=False))

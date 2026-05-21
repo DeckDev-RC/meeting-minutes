@@ -33,6 +33,9 @@ pub struct BenchmarkReport {
     pub action_count: usize,
     pub diarization_mode: String,
     pub diarization_threads: i32,
+    pub diarization_backend_used: String,
+    pub diarization_fallback_reason: Option<String>,
+    pub diarization_wall_clock_sec: f64,
     pub stages: Vec<BenchmarkStage>,
     pub output_files: Vec<String>,
     pub notes: Vec<String>,
@@ -79,6 +82,18 @@ pub fn render_benchmark_markdown(report: &BenchmarkReport) -> String {
         "- Threads de diarizacao: `{}`\n\n",
         report.diarization_threads
     ));
+    output.push_str(&format!(
+        "- Backend de diarizacao: `{}`\n",
+        report.diarization_backend_used
+    ));
+    output.push_str(&format!(
+        "- Tempo de diarizacao: {:.2}s\n",
+        report.diarization_wall_clock_sec
+    ));
+    if let Some(reason) = &report.diarization_fallback_reason {
+        output.push_str(&format!("- Fallback de diarizacao: {}\n", reason));
+    }
+    output.push('\n');
 
     output.push_str("## Volume processado\n\n");
     output.push_str(&format!("- Chunks: {}\n", report.chunk_count));
@@ -159,6 +174,9 @@ mod tests {
             action_count: 7,
             diarization_mode: "hybrid".to_string(),
             diarization_threads: 8,
+            diarization_backend_used: "sherpa-hybrid".to_string(),
+            diarization_fallback_reason: None,
+            diarization_wall_clock_sec: 42.0,
             stages: vec![BenchmarkStage {
                 name: "transcribe".to_string(),
                 duration_sec: 250.0,
@@ -173,6 +191,8 @@ mod tests {
         assert!(markdown.contains("RTF: 0.250"));
         assert!(markdown.contains("Velocidade: 4.00x"));
         assert!(markdown.contains("Modo de diarizacao: `hybrid`"));
+        assert!(markdown.contains("Backend de diarizacao: `sherpa-hybrid`"));
+        assert!(markdown.contains("Tempo de diarizacao: 42.00s"));
         assert!(markdown.contains("Chunks: 4"));
         assert!(markdown.contains("| transcribe | 250.00s |"));
     }

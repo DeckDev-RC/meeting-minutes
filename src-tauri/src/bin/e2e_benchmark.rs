@@ -6,10 +6,11 @@ use meeting_minutes_lib::commands::audio::{
     validate_chunk_output_format,
 };
 use meeting_minutes_lib::commands::diarize::{
-    align_speaker_turns_to_transcription, diarization_asset_paths, diarize_audio_turns_modern_cpu,
-    diarize_audio_with_modern_cpu, diarize_with_mode, ensure_diarization_assets_in_dir,
-    merge_selective_refinement, normalize_diarization_threads,
-    select_suspicious_refinement_windows, DiarizationMode, RefinementWindow,
+    align_speaker_turns_to_transcription, build_diarization_telemetry, diarization_asset_paths,
+    diarization_mode_label, diarize_audio_turns_modern_cpu, diarize_audio_with_modern_cpu,
+    diarize_with_mode_report, ensure_diarization_assets_in_dir, merge_selective_refinement,
+    normalize_diarization_threads, select_suspicious_refinement_windows, DiarizationBackend,
+    DiarizationMode, DiarizationTelemetry, RefinementWindow,
 };
 use meeting_minutes_lib::commands::generate::{
     extract_chunk_facts_with_client, generate_ata_from_facts_with_client,
@@ -64,18 +65,6 @@ fn parse_positive_usize(value: Option<String>, fallback: usize) -> usize {
 
 fn parse_optional_i32(value: Option<String>) -> Option<i32> {
     value.and_then(|value| value.parse::<i32>().ok())
-}
-
-fn diarization_mode_label(mode: DiarizationMode) -> &'static str {
-    match mode {
-        DiarizationMode::Auto => "auto",
-        DiarizationMode::Fast => "fast",
-        DiarizationMode::Hybrid => "hybrid",
-        DiarizationMode::ModernCpu => "modern-cpu",
-        DiarizationMode::ModernCpuChunked => "modern-cpu-chunked",
-        DiarizationMode::Precise => "precise",
-        DiarizationMode::Pyannote => "pyannote",
-    }
 }
 
 fn default_project_root() -> Result<PathBuf, String> {
@@ -630,7 +619,14 @@ async fn main() -> Result<(), String> {
                         1,
                     );
                     if windows.is_empty() {
-                        return Ok(base);
+                        let telemetry = build_diarization_telemetry(
+                            options.diarization_mode,
+                            DiarizationBackend::ModernCpu,
+                            None,
+                            diarization_started.elapsed().as_secs_f64(),
+                            &base,
+                        );
+                        return Ok((base, telemetry));
                     }
                     let selected_chunks = export_refinement_windows_with_ffmpeg(
                         &options.ffmpeg,
@@ -638,7 +634,14 @@ async fn main() -> Result<(), String> {
                         &options.out_dir.join("refinement-windows"),
                     )?;
                     if selected_chunks.is_empty() {
-                        return Ok(base);
+                        let telemetry = build_diarization_telemetry(
+                            options.diarization_mode,
+                            DiarizationBackend::ModernCpu,
+                            None,
+                            diarization_started.elapsed().as_secs_f64(),
+                            &base,
+                        );
+                        return Ok((base, telemetry));
                     }
 
                     let local_expected_speakers =
@@ -674,7 +677,16 @@ async fn main() -> Result<(), String> {
                             1.0,
                         );
 
-                    return Ok(merge_selective_refinement(base, refined, &selected_chunks));
+                    let merged = merge_selective_refinement(base, refined, &selected_chunks);
+                    let telemetry = build_diarization_telemetry(
+                        options.diarization_mode,
+                        DiarizationBackend::ModernCpu,
+                        None,
+                        diarization_started.elapsed().as_secs_f64(),
+                        &merged,
+                    );
+
+                    return Ok((merged, telemetry));
                 }
                 Ok(_) if options.diarization_mode == DiarizationMode::ModernCpu => {
                     return Err("Modern CPU diarization returned no speaker turns".to_string());
@@ -688,7 +700,9 @@ async fn main() -> Result<(), String> {
 
         let assets = if matches!(
             options.diarization_mode,
-            DiarizationMode::ModernCpu
+            DiarizationMode::Fast
+                | DiarizationMode::Auto
+                | DiarizationMode::ModernCpu
                 | DiarizationMode::ModernCpuChunked
                 | DiarizationMode::Pyannote
         ) {
@@ -696,7 +710,7 @@ async fn main() -> Result<(), String> {
         } else {
             ensure_diarization_assets_in_dir(&options.app_data_dir).await?
         };
-        diarize_with_mode(
+        let run = diarize_with_mode_report(
             normalized_audio.to_string_lossy().to_string(),
             transcript_segments.clone(),
             Some(chunks.clone()),
@@ -705,10 +719,12 @@ async fn main() -> Result<(), String> {
             options.diarization_mode,
             options.diarization_threads,
         )
-        .await
+        .await?;
+        Ok::<(DiarizedResult, DiarizationTelemetry), String>((run.result, run.telemetry))
     };
 
-    let (diarized, facts) = tokio::try_join!(diarized_future, facts_future)?;
+    let ((diarized, diarization_telemetry), facts) =
+        tokio::try_join!(diarized_future, facts_future)?;
     stages.push(BenchmarkStage {
         name: "diarize_speculative".to_string(),
         duration_sec: diarization_started.elapsed().as_secs_f64(),
@@ -784,6 +800,9 @@ async fn main() -> Result<(), String> {
         action_count,
         diarization_mode: diarization_mode_label(options.diarization_mode).to_string(),
         diarization_threads: options.diarization_threads,
+        diarization_backend_used: diarization_telemetry.backend_used,
+        diarization_fallback_reason: diarization_telemetry.fallback_reason,
+        diarization_wall_clock_sec: diarization_telemetry.wall_clock_sec,
         stages,
         output_files,
         notes,
