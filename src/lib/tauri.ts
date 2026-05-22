@@ -211,7 +211,8 @@ export const generateAtaFromFacts = (
   factsJson: string,
   geminiApiKey: string,
   participantNames: string[] = [],
-  meetingMetadata?: MeetingMetadata
+  meetingMetadata?: MeetingMetadata,
+  preferLocal = false
 ) =>
   invoke<string>('generate_ata_from_facts', {
     diarizedJson,
@@ -219,6 +220,7 @@ export const generateAtaFromFacts = (
     geminiApiKey,
     participantNames,
     meetingMetadata,
+    preferLocal,
   });
 
 export const generateAtaFromFactsStreaming = (
@@ -227,7 +229,8 @@ export const generateAtaFromFactsStreaming = (
   factsJson: string,
   geminiApiKey: string,
   participantNames: string[] = [],
-  meetingMetadata?: MeetingMetadata
+  meetingMetadata?: MeetingMetadata,
+  preferLocal = false
 ) =>
   invoke<string>('generate_ata_from_facts_streaming', {
     meetingId,
@@ -236,6 +239,7 @@ export const generateAtaFromFactsStreaming = (
     geminiApiKey,
     participantNames,
     meetingMetadata,
+    preferLocal,
   });
 
 export const saveMeeting = (meeting: Partial<Meeting>) =>

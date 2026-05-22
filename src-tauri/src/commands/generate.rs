@@ -40,6 +40,19 @@ fn gemini_request_body_bytes(body: &serde_json::Value) -> Result<Vec<u8>, String
     serde_json::to_vec(body).map_err(|e| e.to_string())
 }
 
+fn configured_gemini_thinking_budget() -> Option<i32> {
+    std::env::var("MEETING_MINUTES_GEMINI_THINKING_BUDGET")
+        .ok()
+        .and_then(|value| value.trim().parse::<i32>().ok())
+}
+
+fn apply_gemini_thinking_config(mut config: serde_json::Value) -> serde_json::Value {
+    if let Some(budget) = configured_gemini_thinking_budget() {
+        config["thinkingConfig"] = serde_json::json!({ "thinkingBudget": budget });
+    }
+    config
+}
+
 async fn send_gemini_request(
     client: &reqwest::Client,
     gemini_api_key: &str,
@@ -1252,6 +1265,26 @@ fn render_minutes_fact_graph_locally(
     html
 }
 
+pub fn render_ata_from_facts_locally(
+    diarized_json: &str,
+    facts_json: &str,
+    participant_names: Option<&[String]>,
+    meeting_metadata: Option<&MeetingMetadata>,
+) -> Result<String, String> {
+    let request = build_final_minutes_request(
+        diarized_json,
+        facts_json,
+        participant_names,
+        meeting_metadata,
+    )?;
+
+    Ok(render_minutes_fact_graph_locally(
+        &request.diarized,
+        &request.fact_graph,
+        meeting_metadata,
+    ))
+}
+
 fn minutes_html_is_low_quality(html: &str, insights: &[MeetingChunkInsights]) -> bool {
     let trimmed = html.trim();
     if trimmed.len() < 400 {
@@ -1375,7 +1408,7 @@ fn chunk_fact_schema() -> serde_json::Value {
 }
 
 pub fn gemini_chunk_facts_generation_config() -> serde_json::Value {
-    serde_json::json!({
+    apply_gemini_thinking_config(serde_json::json!({
         "temperature": 0.1,
         "maxOutputTokens": 8192,
         "responseMimeType": "application/json",
@@ -1390,16 +1423,16 @@ pub fn gemini_chunk_facts_generation_config() -> serde_json::Value {
             "required": ["chunks"],
             "additionalProperties": false
         }
-    })
+    }))
 }
 
 fn gemini_single_chunk_generation_config() -> serde_json::Value {
-    serde_json::json!({
+    apply_gemini_thinking_config(serde_json::json!({
         "temperature": 0.1,
         "maxOutputTokens": 8192,
         "responseMimeType": "application/json",
         "responseJsonSchema": chunk_fact_schema()
-    })
+    }))
 }
 
 pub fn build_minutes_fact_payload(
@@ -1700,10 +1733,10 @@ Retorne APENAS o HTML do conteudo (sem <!DOCTYPE>, sem <html>, sem <head>, sem <
         "contents": [{
             "parts": [{ "text": prompt }]
         }],
-        "generationConfig": {
+        "generationConfig": apply_gemini_thinking_config(serde_json::json!({
             "temperature": 0.15,
             "maxOutputTokens": 8192
-        }
+        }))
     });
 
     Ok(FinalMinutesRequest {
@@ -1722,6 +1755,7 @@ pub async fn generate_ata_from_facts(
     gemini_api_key: String,
     participant_names: Option<Vec<String>>,
     meeting_metadata: Option<MeetingMetadata>,
+    prefer_local: Option<bool>,
 ) -> Result<String, String> {
     generate_ata_from_facts_with_client(
         &http.0,
@@ -1730,6 +1764,7 @@ pub async fn generate_ata_from_facts(
         gemini_api_key,
         participant_names,
         meeting_metadata,
+        prefer_local.unwrap_or(false),
     )
     .await
 }
@@ -1811,6 +1846,7 @@ pub async fn generate_ata_from_facts_streaming(
     gemini_api_key: String,
     participant_names: Option<Vec<String>>,
     meeting_metadata: Option<MeetingMetadata>,
+    prefer_local: Option<bool>,
 ) -> Result<String, String> {
     let request = build_final_minutes_request(
         &diarized_json,
@@ -1818,6 +1854,16 @@ pub async fn generate_ata_from_facts_streaming(
         participant_names.as_deref(),
         meeting_metadata.as_ref(),
     )?;
+
+    if prefer_local.unwrap_or(false) {
+        let html = render_minutes_fact_graph_locally(
+            &request.diarized,
+            &request.fact_graph,
+            meeting_metadata.as_ref(),
+        );
+        emit_minutes_stream_delta(&app, &meeting_id, html.clone(), true);
+        return Ok(html);
+    }
 
     let html = match stream_gemini_text(&http.0, &gemini_api_key, &request.body, &app, &meeting_id)
         .await
@@ -1851,6 +1897,7 @@ pub async fn generate_ata_from_facts_with_client(
     gemini_api_key: String,
     participant_names: Option<Vec<String>>,
     meeting_metadata: Option<MeetingMetadata>,
+    prefer_local: bool,
 ) -> Result<String, String> {
     let request = build_final_minutes_request(
         &diarized_json,
@@ -1859,6 +1906,14 @@ pub async fn generate_ata_from_facts_with_client(
         meeting_metadata.as_ref(),
     );
     let request = request?;
+
+    if prefer_local {
+        return Ok(render_minutes_fact_graph_locally(
+            &request.diarized,
+            &request.fact_graph,
+            meeting_metadata.as_ref(),
+        ));
+    }
 
     let result = send_gemini_request(client, &gemini_api_key, &request.body).await?;
     let html = extract_gemini_text(result)?;
@@ -1917,10 +1972,10 @@ Retorne APENAS o HTML do conteudo (sem <!DOCTYPE>, sem <html>, sem <head>, sem <
         "contents": [{
             "parts": [{ "text": prompt }]
         }],
-        "generationConfig": {
+        "generationConfig": apply_gemini_thinking_config(serde_json::json!({
             "temperature": 0.3,
             "maxOutputTokens": 8192
-        }
+        }))
     });
 
     let result = send_gemini_request(client, &gemini_api_key, &body).await?;

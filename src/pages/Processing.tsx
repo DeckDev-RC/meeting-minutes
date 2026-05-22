@@ -616,7 +616,7 @@ export default function Processing() {
       }
       if (payload.done) {
         flushMinutesStreamPreview(id);
-        addLiveLog(id, "success", "Ata final recebida do Gemini.");
+        addLiveLog(id, "success", "Ata final recebida.");
       }
     }).then((unlisten) => {
       if (disposed) {
@@ -1295,7 +1295,14 @@ export default function Processing() {
         storedChunks.length,
       );
       setLiveTab("minutes");
-      addLiveLog(meetingId, "info", "Gerando ata final com streaming.");
+      const preferLocalMinutes = processingProfile !== "precision";
+      addLiveLog(
+        meetingId,
+        "info",
+        preferLocalMinutes
+          ? "Montando ata final localmente."
+          : "Gerando ata final com streaming.",
+      );
       minutesStreamRawSnapshots.set(meetingId, "");
       minutesStreamRawRef.current = "";
       commitLiveState(meetingId, (state) => ({
@@ -1310,6 +1317,7 @@ export default function Processing() {
         keys.gemini,
         participantNames,
         meetingMetadata,
+        preferLocalMinutes,
       );
       minutesStreamRawSnapshots.set(meetingId, ataHtml);
       minutesStreamRawRef.current = ataHtml;

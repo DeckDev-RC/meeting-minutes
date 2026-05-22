@@ -14,6 +14,7 @@ use meeting_minutes_lib::commands::diarize::{
 };
 use meeting_minutes_lib::commands::generate::{
     extract_chunk_facts_with_client, generate_ata_from_facts_with_client,
+    render_ata_from_facts_locally,
 };
 use meeting_minutes_lib::commands::transcribe::transcribe_chunk_with_client;
 use meeting_minutes_lib::models::audio::{ExportedChunk, SmartChunkOptions};
@@ -37,11 +38,44 @@ struct CliOptions {
     ffmpeg: PathBuf,
     config: PathBuf,
     app_data_dir: PathBuf,
+    reuse_transcription_from: Option<PathBuf>,
     transcribe_concurrency: usize,
     facts_concurrency: usize,
+    chunk_target_sec: f64,
+    chunk_min_sec: f64,
+    chunk_max_sec: f64,
+    chunk_overlap_sec: f64,
+    minutes_mode: MinutesMode,
     expected_speakers: Option<i32>,
     diarization_mode: DiarizationMode,
     diarization_threads: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MinutesMode {
+    Gemini,
+    Local,
+}
+
+impl MinutesMode {
+    fn from_option(value: Option<String>) -> Self {
+        match value
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("local") | Some("local-first") | Some("deterministic") => Self::Local,
+            _ => Self::Gemini,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Gemini => "gemini",
+            Self::Local => "local",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -60,6 +94,13 @@ fn parse_positive_usize(value: Option<String>, fallback: usize) -> usize {
     value
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
+        .unwrap_or(fallback)
+}
+
+fn parse_positive_f64(value: Option<String>, fallback: f64) -> f64 {
+    value
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
         .unwrap_or(fallback)
 }
 
@@ -116,6 +157,8 @@ fn parse_cli() -> Result<CliOptions, String> {
     let app_data_dir = arg_value(&args, "--app-data-dir")
         .map(PathBuf::from)
         .unwrap_or(default_app_data_dir()?);
+    let reuse_transcription_from =
+        arg_value(&args, "--reuse-transcription-from").map(PathBuf::from);
     let expected_speakers =
         arg_value(&args, "--expected-speakers").and_then(|value| value.parse::<i32>().ok());
     let diarization_mode = DiarizationMode::from_option(arg_value(&args, "--diarization-mode"));
@@ -126,6 +169,16 @@ fn parse_cli() -> Result<CliOptions, String> {
         parse_optional_i32(arg_value(&args, "--diarization-threads")),
         available_threads,
     );
+    let chunk_defaults = SmartChunkOptions::default();
+    let chunk_target_sec =
+        parse_positive_f64(arg_value(&args, "--target-sec"), chunk_defaults.target_sec);
+    let chunk_min_sec = parse_positive_f64(arg_value(&args, "--min-sec"), chunk_defaults.min_sec);
+    let chunk_max_sec = parse_positive_f64(arg_value(&args, "--max-sec"), chunk_defaults.max_sec);
+    let chunk_overlap_sec = parse_positive_f64(
+        arg_value(&args, "--overlap-sec"),
+        chunk_defaults.overlap_sec,
+    );
+    let minutes_mode = MinutesMode::from_option(arg_value(&args, "--minutes-mode"));
 
     Ok(CliOptions {
         input,
@@ -135,11 +188,17 @@ fn parse_cli() -> Result<CliOptions, String> {
         ffmpeg,
         config,
         app_data_dir,
+        reuse_transcription_from,
         transcribe_concurrency: parse_positive_usize(
             arg_value(&args, "--transcribe-concurrency"),
             3,
         ),
         facts_concurrency: parse_positive_usize(arg_value(&args, "--facts-concurrency"), 2),
+        chunk_target_sec,
+        chunk_min_sec,
+        chunk_max_sec,
+        chunk_overlap_sec,
+        minutes_mode,
         expected_speakers,
         diarization_mode,
         diarization_threads,
@@ -525,6 +584,12 @@ fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), String>
     std::fs::write(path, json).map_err(|e| format!("Failed to write {}: {e}", path.display()))
 }
 
+fn read_transcription_segments(path: &Path) -> Result<Vec<TranscriptionSegment>, String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|e| format!("Failed to parse {}: {e}", path.display()))
+}
+
 #[tokio::main]
 async fn main() -> Result<(), String> {
     let options = parse_cli()?;
@@ -544,6 +609,10 @@ async fn main() -> Result<(), String> {
 
     let started = Instant::now();
     let mut chunk_options = SmartChunkOptions::default();
+    chunk_options.target_sec = options.chunk_target_sec;
+    chunk_options.min_sec = options.chunk_min_sec;
+    chunk_options.max_sec = options.chunk_max_sec;
+    chunk_options.overlap_sec = options.chunk_overlap_sec;
     chunk_options.output_format = "flac".to_string();
     let chunks = create_smart_chunks(
         &options.ffmpeg,
@@ -574,10 +643,21 @@ async fn main() -> Result<(), String> {
     };
 
     let started = Instant::now();
-    let transcript_segments =
+    let transcript_segments = if let Some(reuse_dir) = &options.reuse_transcription_from {
+        read_transcription_segments(&reuse_dir.join("transcription-segments.json"))?
+    } else {
         transcribe_chunks_concurrently(chunks.clone(), keys.groq, options.transcribe_concurrency)
-            .await?;
-    stage_push(&mut stages, "transcribe", started);
+            .await?
+    };
+    stage_push(
+        &mut stages,
+        if options.reuse_transcription_from.is_some() {
+            "transcribe_reuse"
+        } else {
+            "transcribe"
+        },
+        started,
+    );
     write_json(
         &options.out_dir.join("transcription-segments.json"),
         &transcript_segments,
@@ -746,16 +826,26 @@ async fn main() -> Result<(), String> {
     eprintln!("[benchmark] fact chunks: {}", facts.len());
 
     let started = Instant::now();
-    let client = reqwest::Client::new();
-    let minutes_html = generate_ata_from_facts_with_client(
-        &client,
-        serde_json::to_string(&diarized).map_err(|e| e.to_string())?,
-        serde_json::to_string(&facts).map_err(|e| e.to_string())?,
-        keys.gemini,
-        None,
-        None,
-    )
-    .await?;
+    let diarized_json = serde_json::to_string(&diarized).map_err(|e| e.to_string())?;
+    let facts_json = serde_json::to_string(&facts).map_err(|e| e.to_string())?;
+    let minutes_html = match options.minutes_mode {
+        MinutesMode::Gemini => {
+            let client = reqwest::Client::new();
+            generate_ata_from_facts_with_client(
+                &client,
+                diarized_json,
+                facts_json,
+                keys.gemini,
+                None,
+                None,
+                false,
+            )
+            .await?
+        }
+        MinutesMode::Local => {
+            render_ata_from_facts_locally(&diarized_json, &facts_json, None, None)?
+        }
+    };
     stage_push(&mut stages, "generate_minutes", started);
     let minutes_path = options.out_dir.join("minutes.html");
     std::fs::write(&minutes_path, minutes_html)
@@ -763,6 +853,28 @@ async fn main() -> Result<(), String> {
 
     let wall_clock_sec = total_started.elapsed().as_secs_f64();
     let speed = compute_benchmark_speed(audio_duration_sec, wall_clock_sec)?;
+    notes.push(format!(
+        "Benchmark config: target_sec={:.0}, min_sec={:.0}, max_sec={:.0}, overlap_sec={:.1}, minutes_mode={}, facts_concurrency={}, transcribe_concurrency={}.",
+        options.chunk_target_sec,
+        options.chunk_min_sec,
+        options.chunk_max_sec,
+        options.chunk_overlap_sec,
+        options.minutes_mode.label(),
+        options.facts_concurrency,
+        options.transcribe_concurrency
+    ));
+    if let Ok(budget) = std::env::var("MEETING_MINUTES_GEMINI_THINKING_BUDGET") {
+        notes.push(format!("Gemini thinking budget env: {budget}."));
+    }
+    if let Some(reuse_dir) = &options.reuse_transcription_from {
+        notes.push(format!(
+            "Transcription reused from {}.",
+            reuse_dir.to_string_lossy()
+        ));
+    }
+    if let Some(expected_speakers) = options.expected_speakers {
+        notes.push(format!("Expected speakers: {expected_speakers}."));
+    }
     notes.push(
         "Qualidade factual: n/a neste run porque nao ha gabarito manual anexado.".to_string(),
     );
