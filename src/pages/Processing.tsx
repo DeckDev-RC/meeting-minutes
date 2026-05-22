@@ -24,6 +24,7 @@ import {
   transcribeChunk,
   transcribeChunkCloudflare,
   transcribeChunkDeepgram,
+  transcribeChunkLocal,
   updateProcessingChunkFacts,
   updateProcessingChunkResult,
   updateMeetingStatus,
@@ -41,8 +42,11 @@ import { derivePipelineProgress, type PipelinePhase } from "../lib/pipelineProgr
 import { factConcurrencyForPhase, transcriptionConcurrencyForProfile } from "../lib/processingConcurrency";
 import {
   LOCAL_TRANSCRIPTION_REQUIRED_AUDIO_SEC,
+  isQuotaOrRateLimitError,
   isLocalTranscriptionBackend,
+  selectFallbackTranscriptionBackends,
   selectTranscriptionBackend,
+  type TranscriptionBackend,
   transcriptionBackendLabel,
 } from "../lib/transcriptionProvider";
 import {
@@ -1158,6 +1162,117 @@ export default function Processing() {
           "Rota local selecionada para manter processamento sem API de transcricao.",
         );
       }
+      const unavailableTranscriptionBackends = new Set<TranscriptionBackend>();
+      const markTranscriptionBackendUnavailable = (
+        backend: TranscriptionBackend,
+        reason: string,
+      ) => {
+        if (isLocalTranscriptionBackend(backend) || unavailableTranscriptionBackends.has(backend)) {
+          return;
+        }
+
+        unavailableTranscriptionBackends.add(backend);
+        const fallbackBackends = selectFallbackTranscriptionBackends({
+          totalAudioSec,
+          groqApiKey: keys.groq,
+          cloudflareAccountId: keys.cloudflareAccountId,
+          cloudflareApiToken: keys.cloudflareApiToken,
+          deepgramApiKey: keys.deepgramApiKey,
+          profile: keys.transcriptionProfile,
+          manualProvider: keys.manualTranscriptionProvider,
+          primaryBackend: backend,
+          unavailableBackends: Array.from(unavailableTranscriptionBackends),
+        });
+        const fallbackLabel = fallbackBackends[0]
+          ? transcriptionBackendLabel(fallbackBackends[0])
+          : "sem fallback configurado";
+        const routeNote = `Transcricao: ${transcriptionBackendLabel(
+          backend,
+        )} indisponivel nesta execucao; usando ${fallbackLabel} como fallback.`;
+        addLiveLog(
+          meetingId,
+          "warning",
+          `${transcriptionBackendLabel(backend)} indisponivel: ${reason}`,
+        );
+        setTranscriptionRouteNote(routeNote);
+        setProcessingNote(routeNote);
+      };
+      const transcribeWithBackend = async (
+        backend: TranscriptionBackend,
+        audioPath: string,
+        offsetSec: number,
+      ) => {
+        if (backend === "cloudflare") {
+          return transcribeChunkCloudflare(
+            audioPath,
+            keys.cloudflareAccountId,
+            keys.cloudflareApiToken,
+            offsetSec,
+          );
+        }
+        if (backend === "deepgram") {
+          return transcribeChunkDeepgram(audioPath, keys.deepgramApiKey, offsetSec);
+        }
+        if (backend === "groq") {
+          return transcribeChunk(audioPath, keys.groq, offsetSec);
+        }
+        return transcribeChunkLocal(audioPath, offsetSec, "turbo");
+      };
+      const transcribeWithFallbacks = async (
+        backend: TranscriptionBackend,
+        audioPath: string,
+        offsetSec: number,
+        chunkIndex?: number,
+      ): Promise<{ backend: TranscriptionBackend; segments: TranscriptionSegment[] }> => {
+        const primaryCandidates = unavailableTranscriptionBackends.has(backend) ? [] : [backend];
+        const fallbackCandidates = selectFallbackTranscriptionBackends({
+          totalAudioSec,
+          groqApiKey: keys.groq,
+          cloudflareAccountId: keys.cloudflareAccountId,
+          cloudflareApiToken: keys.cloudflareApiToken,
+          deepgramApiKey: keys.deepgramApiKey,
+          profile: keys.transcriptionProfile,
+          manualProvider: keys.manualTranscriptionProvider,
+          primaryBackend: backend,
+          unavailableBackends: Array.from(unavailableTranscriptionBackends),
+        });
+        const candidates = [...primaryCandidates, ...fallbackCandidates].filter(
+          (candidate, index, all) => all.indexOf(candidate) === index,
+        );
+        let lastError: unknown = null;
+
+        for (const candidate of candidates) {
+          try {
+            if (candidate !== backend) {
+              addLiveLog(
+                meetingId,
+                "warning",
+                `Chunk ${chunkIndex !== undefined ? chunkIndex + 1 : "atual"} usando fallback ${transcriptionBackendLabel(
+                  candidate,
+                )}.`,
+              );
+            }
+            return {
+              backend: candidate,
+              segments: await transcribeWithBackend(candidate, audioPath, offsetSec),
+            };
+          } catch (err) {
+            const message = formatError(err);
+            lastError = err;
+            if (isQuotaOrRateLimitError(message)) {
+              markTranscriptionBackendUnavailable(candidate, message);
+            } else if (candidate !== backend) {
+              addLiveLog(
+                meetingId,
+                "warning",
+                `Fallback ${transcriptionBackendLabel(candidate)} falhou: ${message}`,
+              );
+            }
+          }
+        }
+
+        throw lastError ?? new Error("Nenhum backend de transcricao disponivel.");
+      };
       updatePipelineProgress(
         "transcribe",
         completedAudioSec,
@@ -1243,26 +1358,23 @@ export default function Processing() {
           chunks: pendingChunks,
           apiKey: remoteApiKey,
           concurrency: transcriptionConcurrencyForProfile(processingProfile),
-          transcribeChunk: async (audioPath, apiKey, offsetSec) => {
+          transcribeChunk: async (audioPath, _apiKey, offsetSec) => {
             const chunk = pendingChunkByPath.get(audioPath);
             if (chunk) {
               await updateProcessingChunkResult(meetingId, chunk.index, "running");
               patchStoredChunk(chunk.index, { status: "running" });
             }
             try {
-              let segments =
-                transcriptionBackend === "cloudflare"
-                  ? await transcribeChunkCloudflare(
-                      audioPath,
-                      keys.cloudflareAccountId,
-                      keys.cloudflareApiToken,
-                      offsetSec,
-                    )
-                  : transcriptionBackend === "deepgram"
-                    ? await transcribeChunkDeepgram(audioPath, keys.deepgramApiKey, offsetSec)
-                    : await transcribeChunk(audioPath, apiKey, offsetSec);
+              const transcriptionResult = await transcribeWithFallbacks(
+                transcriptionBackend,
+                audioPath,
+                offsetSec,
+                chunk?.index,
+              );
+              let segments = transcriptionResult.segments;
+              let segmentBackend = transcriptionResult.backend;
               if (
-                transcriptionBackend === "cloudflare" &&
+                segmentBackend === "cloudflare" &&
                 (keys.transcriptionProfile ?? "smart-low-cost") === "smart-low-cost" &&
                 keys.deepgramApiKey?.trim() &&
                 chunk
@@ -1283,6 +1395,7 @@ export default function Processing() {
                       keys.deepgramApiKey,
                       offsetSec,
                     );
+                    segmentBackend = "deepgram";
                     addLiveLog(
                       meetingId,
                       "success",
@@ -1301,7 +1414,11 @@ export default function Processing() {
                 commitLiveState(meetingId, (state) =>
                   appendLiveTranscript(state, chunk.index, segments),
                 );
-                addLiveLog(meetingId, "success", `Chunk ${chunk.index + 1} transcrito.`);
+                addLiveLog(
+                  meetingId,
+                  "success",
+                  `Chunk ${chunk.index + 1} transcrito com ${transcriptionBackendLabel(segmentBackend)}.`,
+                );
               }
               const rawSegmentsJson = JSON.stringify(segments);
               if (chunk) {

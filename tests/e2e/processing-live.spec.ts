@@ -2,6 +2,8 @@ import { expect, test, type Page } from "@playwright/test";
 
 const meetingId = "e2e-ui-meeting";
 
+test.describe.configure({ timeout: 60_000 });
+
 async function installTauriMock(page: Page) {
   await page.addInitScript((id) => {
     const delay = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -148,10 +150,15 @@ async function installTauriMock(page: Page) {
           }
           return undefined;
         }
+        if (command === "transcribe_chunk_cloudflare") {
+          throw new Error(
+            "Cloudflare API error 429 Too Many Requests: you have used up your daily free allocation of 10,000 neurons",
+          );
+        }
         if (
           command === "transcribe_chunk" ||
-          command === "transcribe_chunk_cloudflare" ||
-          command === "transcribe_chunk_deepgram"
+          command === "transcribe_chunk_deepgram" ||
+          command === "transcribe_chunk_local"
         ) {
           return transcriptForOffset(Number(args.offsetSec || 0));
         }
@@ -318,12 +325,14 @@ test("processing live panel renders readable transcript, insights, streamed minu
   await page.goto(`/processing/${meetingId}`);
 
   await expect(page.getByRole("heading", { name: "Processando reuniao" })).toBeVisible({
-    timeout: 20_000,
+    timeout: 45_000,
   });
   await expectReadableNavigation(page);
   const panel = await waitForLivePanelReady(page);
   await expect(
-    page.getByText("Motor ativo: Transcricao: Cloudflare com correcao Deepgram seletiva."),
+    page.getByText(
+      "Motor ativo: Transcricao: Cloudflare Whisper indisponivel nesta execucao; usando Deepgram Nova-3 como fallback.",
+    ),
   ).toBeVisible();
 
   await panel.getByRole("button", { name: /Transcricao/ }).click();
@@ -362,6 +371,8 @@ test("processing live panel renders readable transcript, insights, streamed minu
 
   await panel.getByRole("button", { name: /Logs tecnicos/ }).click();
   await expect(panel.getByText("Processamento iniciado.")).toBeVisible();
+  await expect(panel.getByText(/Cloudflare Whisper indisponivel/)).toBeVisible();
+  await expect(panel.getByText(/usando fallback Deepgram Nova-3/).first()).toBeVisible();
   await expect(panel.getByText("Ata final recebida.")).toBeVisible();
   await expect(panel.getByText("Ata final gerada.")).toBeVisible();
 

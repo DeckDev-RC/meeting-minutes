@@ -38,8 +38,10 @@ const compile = spawnSync(
 assert.equal(compile.status, 0, compile.stdout + compile.stderr);
 
 const {
+  isQuotaOrRateLimitError,
   isLocalTranscriptionBackend,
   LOCAL_TRANSCRIPTION_REQUIRED_AUDIO_SEC,
+  selectFallbackTranscriptionBackends,
   selectTranscriptionBackend,
   transcriptionBackendLabel,
 } = require(join(outDir, "transcriptionProvider.js"));
@@ -110,6 +112,41 @@ assert.equal(
   }),
   "groq",
 );
+
+assert.deepEqual(
+  selectFallbackTranscriptionBackends({
+    totalAudioSec: 3 * 3600,
+    primaryBackend: "cloudflare",
+    cloudflareAccountId: "account",
+    cloudflareApiToken: "token",
+    deepgramApiKey: "dg_live",
+    groqApiKey: "gsk_live",
+  }),
+  ["deepgram", "groq", "local"],
+);
+
+assert.deepEqual(
+  selectFallbackTranscriptionBackends({
+    totalAudioSec: 3 * 3600,
+    primaryBackend: "cloudflare",
+    cloudflareAccountId: "account",
+    cloudflareApiToken: "token",
+    unavailableBackends: ["deepgram"],
+  }),
+  ["local"],
+);
+
+assert.deepEqual(
+  selectFallbackTranscriptionBackends({
+    totalAudioSec: 3 * 3600,
+    primaryBackend: "local",
+  }),
+  [],
+);
+
+assert.equal(isQuotaOrRateLimitError("Cloudflare API error 429 Too Many Requests"), true);
+assert.equal(isQuotaOrRateLimitError("daily free allocation of 10,000 neurons"), true);
+assert.equal(isQuotaOrRateLimitError("network disconnected"), false);
 
 assert.equal(isLocalTranscriptionBackend("parakeet-local"), true);
 assert.equal(isLocalTranscriptionBackend("local"), true);

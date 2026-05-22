@@ -53,6 +53,45 @@ function firstConfigured(
   return candidates.find((backend) => isBackendConfigured(backend, input));
 }
 
+export function isQuotaOrRateLimitError(message: string) {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("429") ||
+    normalized.includes("too many requests") ||
+    normalized.includes("rate limit") ||
+    normalized.includes("rate_limit") ||
+    normalized.includes("quota") ||
+    normalized.includes("daily free allocation") ||
+    normalized.includes("used up") ||
+    normalized.includes("neurons") ||
+    normalized.includes("limit exceeded")
+  );
+}
+
+export function selectFallbackTranscriptionBackends({
+  primaryBackend,
+  unavailableBackends = [],
+  ...input
+}: TranscriptionBackendSelectionInput & {
+  primaryBackend: TranscriptionBackend;
+  unavailableBackends?: TranscriptionBackend[];
+}): TranscriptionBackend[] {
+  if (isLocalTranscriptionBackend(primaryBackend)) {
+    return [];
+  }
+
+  const unavailable = new Set<TranscriptionBackend>([primaryBackend, ...unavailableBackends]);
+  const candidatesByPrimary: Record<"groq" | "cloudflare" | "deepgram", TranscriptionBackend[]> = {
+    cloudflare: ["deepgram", "groq", "local"],
+    deepgram: ["cloudflare", "groq", "local"],
+    groq: ["cloudflare", "deepgram", "local"],
+  };
+
+  return candidatesByPrimary[primaryBackend]
+    .filter((backend) => !unavailable.has(backend))
+    .filter((backend) => isBackendConfigured(backend, input));
+}
+
 export function selectTranscriptionBackend({
   totalAudioSec,
   groqApiKey,
