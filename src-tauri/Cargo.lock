@@ -1939,6 +1939,7 @@ name = "meeting-minutes"
 version = "1.0.0"
 dependencies = [
  "aho-corasick",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "futures",

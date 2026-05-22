@@ -1,0 +1,125 @@
+import type { TranscriptionRoutingProfile } from "./types";
+
+export type TranscriptionBackend =
+  | "groq"
+  | "cloudflare"
+  | "deepgram"
+  | "local"
+  | "parakeet-local";
+
+export const LOCAL_TRANSCRIPTION_REQUIRED_AUDIO_SEC = 7200;
+export const DEFAULT_TRANSCRIPTION_PROFILE: TranscriptionRoutingProfile = "smart-low-cost";
+
+export interface TranscriptionBackendSelectionInput {
+  totalAudioSec: number;
+  groqApiKey?: string | null;
+  cloudflareAccountId?: string | null;
+  cloudflareApiToken?: string | null;
+  deepgramApiKey?: string | null;
+  profile?: TranscriptionRoutingProfile | null;
+  manualProvider?: TranscriptionBackend | null;
+}
+
+function hasValue(value?: string | null) {
+  return Boolean(value?.trim());
+}
+
+function localFallbackForDuration(totalAudioSec: number): TranscriptionBackend {
+  return Number.isFinite(totalAudioSec) && totalAudioSec >= LOCAL_TRANSCRIPTION_REQUIRED_AUDIO_SEC
+    ? "parakeet-local"
+    : "local";
+}
+
+function isBackendConfigured(
+  backend: TranscriptionBackend,
+  input: TranscriptionBackendSelectionInput,
+) {
+  if (backend === "cloudflare") {
+    return hasValue(input.cloudflareAccountId) && hasValue(input.cloudflareApiToken);
+  }
+  if (backend === "deepgram") {
+    return hasValue(input.deepgramApiKey);
+  }
+  if (backend === "groq") {
+    return hasValue(input.groqApiKey);
+  }
+  return true;
+}
+
+function firstConfigured(
+  input: TranscriptionBackendSelectionInput,
+  candidates: TranscriptionBackend[],
+) {
+  return candidates.find((backend) => isBackendConfigured(backend, input));
+}
+
+export function selectTranscriptionBackend({
+  totalAudioSec,
+  groqApiKey,
+  cloudflareAccountId,
+  cloudflareApiToken,
+  deepgramApiKey,
+  profile,
+  manualProvider,
+}: TranscriptionBackendSelectionInput): TranscriptionBackend {
+  const input = {
+    totalAudioSec,
+    groqApiKey,
+    cloudflareAccountId,
+    cloudflareApiToken,
+    deepgramApiKey,
+    profile,
+    manualProvider,
+  };
+  const fallback = localFallbackForDuration(totalAudioSec);
+  const activeProfile = profile || DEFAULT_TRANSCRIPTION_PROFILE;
+
+  if (activeProfile === "manual" && manualProvider) {
+    return isBackendConfigured(manualProvider, input) ? manualProvider : fallback;
+  }
+
+  if (activeProfile === "offline-free") {
+    return "parakeet-local";
+  }
+
+  if (activeProfile === "groq-turbo") {
+    return firstConfigured(input, ["groq", "cloudflare", "deepgram"]) ?? fallback;
+  }
+
+  if (activeProfile === "max-quality") {
+    return firstConfigured(input, ["deepgram", "cloudflare", "groq"]) ?? fallback;
+  }
+
+  if (
+    !profile &&
+    Number.isFinite(totalAudioSec) &&
+    totalAudioSec >= LOCAL_TRANSCRIPTION_REQUIRED_AUDIO_SEC &&
+    !hasValue(cloudflareAccountId) &&
+    !hasValue(cloudflareApiToken) &&
+    !hasValue(deepgramApiKey)
+  ) {
+    return "parakeet-local";
+  }
+
+  return firstConfigured(input, ["cloudflare", "groq", "deepgram"]) ?? fallback;
+}
+
+export function transcriptionBackendLabel(backend: TranscriptionBackend) {
+  if (backend === "parakeet-local") {
+    return "Parakeet local";
+  }
+  if (backend === "local") {
+    return "faster-whisper local";
+  }
+  if (backend === "cloudflare") {
+    return "Cloudflare Whisper";
+  }
+  if (backend === "deepgram") {
+    return "Deepgram Nova-3";
+  }
+  return "Groq Whisper";
+}
+
+export function isLocalTranscriptionBackend(backend: TranscriptionBackend) {
+  return backend === "local" || backend === "parakeet-local";
+}

@@ -77,7 +77,16 @@ async function installTauriMock(page: Page) {
         await delay(15);
 
         if (command === "get_api_keys") {
-          return { groq: "groq-key", gemini: "gemini-key", expectedSpeakers: 2 };
+          return {
+            groq: "groq-key",
+            gemini: "gemini-key",
+            cloudflareAccountId: "cloudflare-account",
+            cloudflareApiToken: "cloudflare-token",
+            deepgramApiKey: "deepgram-key",
+            transcriptionProfile: "smart-low-cost",
+            manualTranscriptionProvider: "groq",
+            expectedSpeakers: 2,
+          };
         }
         if (command === "get_meetings") {
           return [
@@ -93,6 +102,9 @@ async function installTauriMock(page: Page) {
               updatedAt: "2026-05-20T12:00:00Z",
             },
           ];
+        }
+        if (command === "resolve_processing_work_dir") {
+          return "C:\\reunioes\\work\\e2e-ui-meeting";
         }
         if (command === "probe_media_metadata") {
           return {
@@ -136,7 +148,11 @@ async function installTauriMock(page: Page) {
           }
           return undefined;
         }
-        if (command === "transcribe_chunk") {
+        if (
+          command === "transcribe_chunk" ||
+          command === "transcribe_chunk_cloudflare" ||
+          command === "transcribe_chunk_deepgram"
+        ) {
           return transcriptForOffset(Number(args.offsetSec || 0));
         }
         if (
@@ -306,6 +322,9 @@ test("processing live panel renders readable transcript, insights, streamed minu
   });
   await expectReadableNavigation(page);
   const panel = await waitForLivePanelReady(page);
+  await expect(
+    page.getByText("Motor ativo: Transcricao: Cloudflare com correcao Deepgram seletiva."),
+  ).toBeVisible();
 
   await panel.getByRole("button", { name: /Transcricao/ }).click();
   const liveContent = panel.getByRole("region", { name: "Conteudo ao vivo" });
@@ -343,7 +362,7 @@ test("processing live panel renders readable transcript, insights, streamed minu
 
   await panel.getByRole("button", { name: /Logs tecnicos/ }).click();
   await expect(panel.getByText("Processamento iniciado.")).toBeVisible();
-  await expect(panel.getByText("Ata final recebida do Gemini.")).toBeVisible();
+  await expect(panel.getByText("Ata final recebida.")).toBeVisible();
   await expect(panel.getByText("Ata final gerada.")).toBeVisible();
 
   await expectNoHorizontalOverflow(page);

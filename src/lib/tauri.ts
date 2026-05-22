@@ -3,6 +3,7 @@ import type {
   DiarizedResult,
   DiarizationOptions,
   ExportedChunk,
+  LocalTranscriptionChunkResult,
   Meeting,
   MeetingMetadata,
   MeetingChunkInsights,
@@ -94,6 +95,45 @@ export const updateProcessingChunkFacts = (
 
 export const transcribeChunk = (audioPath: string, groqApiKey: string, offsetSec: number) =>
   invoke<TranscriptionSegment[]>('transcribe_chunk', { audioPath, groqApiKey, offsetSec });
+
+export const transcribeChunkCloudflare = (
+  audioPath: string,
+  cloudflareAccountId: string,
+  cloudflareApiToken: string,
+  offsetSec: number
+) =>
+  invoke<TranscriptionSegment[]>('transcribe_chunk_cloudflare', {
+    audioPath,
+    cloudflareAccountId,
+    cloudflareApiToken,
+    offsetSec,
+  });
+
+export const transcribeChunkDeepgram = (
+  audioPath: string,
+  deepgramApiKey: string,
+  offsetSec: number
+) =>
+  invoke<TranscriptionSegment[]>('transcribe_chunk_deepgram', {
+    audioPath,
+    deepgramApiKey,
+    offsetSec,
+  });
+
+export const transcribeChunkLocal = (audioPath: string, offsetSec: number, model = 'turbo') =>
+  invoke<TranscriptionSegment[]>('transcribe_chunk_local', { audioPath, offsetSec, model });
+
+export const transcribeChunksLocal = (audioChunks: ExportedChunk[], model = 'turbo') =>
+  invoke<LocalTranscriptionChunkResult[]>('transcribe_chunks_local', { audioChunks, model });
+
+export const transcribeChunksParakeetLocal = (
+  audioChunks: ExportedChunk[],
+  model = 'nvidia/parakeet-tdt-0.6b-v3',
+) =>
+  invoke<LocalTranscriptionChunkResult[]>('transcribe_chunks_parakeet_local', {
+    audioChunks,
+    model,
+  });
 
 export const diarizeTranscription = (segmentsJson: string, geminiApiKey: string) =>
   invoke<DiarizedResult>('diarize_transcription', { segmentsJson, geminiApiKey });
@@ -270,7 +310,34 @@ export const openFolder = (path: string) =>
   invoke<void>('open_folder', { path });
 
 export const getApiKeys = () =>
-  invoke<{ groq: string; gemini: string; expectedSpeakers?: number }>('get_api_keys');
+  invoke<{
+    groq: string;
+    gemini: string;
+    cloudflareAccountId: string;
+    cloudflareApiToken: string;
+    deepgramApiKey: string;
+    transcriptionProfile?: import('./types').TranscriptionRoutingProfile;
+    manualTranscriptionProvider?: import('./transcriptionProvider').TranscriptionBackend;
+    expectedSpeakers?: number;
+  }>('get_api_keys');
 
-export const setApiKeys = (groq: string, gemini: string, expectedSpeakers?: number) =>
-  invoke<void>('set_api_keys', { groq, gemini, expectedSpeakers });
+export const setApiKeys = (
+  groq: string,
+  gemini: string,
+  cloudflareAccountId: string,
+  cloudflareApiToken: string,
+  deepgramApiKey: string,
+  transcriptionProfile?: import('./types').TranscriptionRoutingProfile,
+  manualTranscriptionProvider?: import('./transcriptionProvider').TranscriptionBackend,
+  expectedSpeakers?: number
+) =>
+  invoke<void>('set_api_keys', {
+    groq,
+    gemini,
+    cloudflareAccountId,
+    cloudflareApiToken,
+    deepgramApiKey,
+    transcriptionProfile,
+    manualTranscriptionProvider,
+    expectedSpeakers,
+  });

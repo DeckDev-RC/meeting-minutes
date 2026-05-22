@@ -22,6 +22,8 @@ import {
   saveBenchmarkRun,
   resolveProcessingWorkDir,
   transcribeChunk,
+  transcribeChunkCloudflare,
+  transcribeChunkDeepgram,
   updateProcessingChunkFacts,
   updateProcessingChunkResult,
   updateMeetingStatus,
@@ -29,15 +31,20 @@ import {
   refineDiarizationSelectively,
 } from "../lib/tauri";
 import { transcribeChunksConcurrently } from "../lib/transcriptionQueue";
+import { transcribeChunksWithLocalBackend } from "../lib/localTranscription";
+import { scoreCloudflareTranscriptRisk } from "../lib/transcriptionQuality";
 import { mergeSortedTranscriptionSegments } from "../lib/segmentMerge";
 import { resolveSegmentsForFactScheduling } from "../lib/processingChunks";
 import { buildAdaptiveFactBatches, type FactBatchItem } from "../lib/meetingFactsQueue";
 import { buildBenchmarkRun, buildBenchmarkRunArtifactPath } from "../lib/benchmarkRun";
 import { derivePipelineProgress, type PipelinePhase } from "../lib/pipelineProgress";
+import { factConcurrencyForPhase, transcriptionConcurrencyForProfile } from "../lib/processingConcurrency";
 import {
-  factConcurrencyForPhase,
-  transcriptionConcurrencyForProfile,
-} from "../lib/processingConcurrency";
+  LOCAL_TRANSCRIPTION_REQUIRED_AUDIO_SEC,
+  isLocalTranscriptionBackend,
+  selectTranscriptionBackend,
+  transcriptionBackendLabel,
+} from "../lib/transcriptionProvider";
 import {
   resolveDiarizationExpectedSpeakers,
   shouldPreferChunkedDiarization,
@@ -241,6 +248,7 @@ const sumChunkDurations = (chunks: Pick<ProcessingChunkRecord, "durationSec">[])
 const isTranscriptionSegment = (value: unknown): value is TranscriptionSegment => {
   if (!value || typeof value !== "object") return false;
   const segment = value as Partial<TranscriptionSegment>;
+
   return (
     typeof segment.id === "number" &&
     typeof segment.start === "number" &&
@@ -447,6 +455,7 @@ export default function Processing() {
     createLiveProcessingState(),
   );
   const [liveTab, setLiveTab] = useState<LiveTab>("transcript");
+  const [transcriptionRouteNote, setTranscriptionRouteNote] = useState("");
   const {
     stepStatus,
     currentStep,
@@ -698,6 +707,7 @@ export default function Processing() {
       liveProcessingLastPublishedAt.set(meetingId, Date.now());
       transcriptAutoScrollRef.current = true;
       setLiveTab("transcript");
+      setTranscriptionRouteNote("");
       setCurrentMeeting(meetingId);
       setError(null);
       setProcessingNote("");
@@ -710,8 +720,8 @@ export default function Processing() {
       updatePipelineProgress("prepare_audio", 0, 0, 0, 0);
 
       const keys = await getApiKeys();
-      if (!keys.groq || !keys.gemini) {
-        setError("Configure suas chaves de API em Configuracoes antes de processar.");
+      if (!keys.gemini) {
+        setError("Configure a chave Gemini em Configuracoes antes de processar.");
         return;
       }
 
@@ -1115,7 +1125,39 @@ export default function Processing() {
       // Step 2: Transcribe pending chunks.
       setStep("transcribe");
       setStepStatus("transcribe", "running");
-      addLiveLog(meetingId, "info", "Transcricao iniciada.");
+      const transcriptionBackend = selectTranscriptionBackend({
+        totalAudioSec,
+        groqApiKey: keys.groq,
+        cloudflareAccountId: keys.cloudflareAccountId,
+        cloudflareApiToken: keys.cloudflareApiToken,
+        deepgramApiKey: keys.deepgramApiKey,
+        profile: keys.transcriptionProfile,
+        manualProvider: keys.manualTranscriptionProvider,
+      });
+      addLiveLog(
+        meetingId,
+        "info",
+        `Transcricao iniciada com ${transcriptionBackendLabel(transcriptionBackend)}.`,
+      );
+      const selectiveDeepgramCorrection =
+        transcriptionBackend === "cloudflare" &&
+        (keys.transcriptionProfile ?? "smart-low-cost") === "smart-low-cost" &&
+        Boolean(keys.deepgramApiKey?.trim());
+      const activeTranscriptionRouteNote = selectiveDeepgramCorrection
+        ? "Transcricao: Cloudflare com correcao Deepgram seletiva."
+        : `Transcricao: ${transcriptionBackendLabel(transcriptionBackend)}.`;
+      setTranscriptionRouteNote(activeTranscriptionRouteNote);
+      setProcessingNote(activeTranscriptionRouteNote);
+      if (
+        isLocalTranscriptionBackend(transcriptionBackend) &&
+        totalAudioSec >= LOCAL_TRANSCRIPTION_REQUIRED_AUDIO_SEC
+      ) {
+        addLiveLog(
+          meetingId,
+          "info",
+          "Rota local selecionada para manter processamento sem API de transcricao.",
+        );
+      }
       updatePipelineProgress(
         "transcribe",
         completedAudioSec,
@@ -1124,65 +1166,63 @@ export default function Processing() {
         storedChunks.length,
       );
 
-      const newSegments = await transcribeChunksConcurrently({
-        chunks: pendingChunks,
-        apiKey: keys.groq,
-        concurrency: transcriptionConcurrencyForProfile(processingProfile),
-        transcribeChunk: async (audioPath, apiKey, offsetSec) => {
-          const chunk = pendingChunkByPath.get(audioPath);
-          if (chunk) {
-            await updateProcessingChunkResult(meetingId, chunk.index, "running");
-            patchStoredChunk(chunk.index, { status: "running" });
-          }
-          try {
-            const segments = await transcribeChunk(audioPath, apiKey, offsetSec);
-            if (chunk) {
-              commitLiveState(meetingId, (state) =>
-                appendLiveTranscript(state, chunk.index, segments),
-              );
-              addLiveLog(meetingId, "success", `Chunk ${chunk.index + 1} transcrito.`);
-            }
-            const rawSegmentsJson = JSON.stringify(segments);
-            if (chunk) {
-              segmentJsonByChunk.set(chunk.index, rawSegmentsJson);
-              const updatedChunk = patchStoredChunk(chunk.index, {
-                status: "done",
-                rawSegmentsJson,
-                errorMsg: null,
-              });
-              if (updatedChunk) {
-                scheduleFactExtraction(updatedChunk, segments);
-              }
-              await updateProcessingChunkResult(
-                meetingId,
-                chunk.index,
-                "done",
-                rawSegmentsJson,
-              );
-            }
-            return segments;
-          } catch (err) {
-            if (chunk) {
-              addLiveLog(
-                meetingId,
-                "error",
-                `Falha na transcricao do chunk ${chunk.index + 1}: ${formatError(err)}`,
-              );
-              await updateProcessingChunkResult(
+      let newSegments: TranscriptionSegment[] = [];
+      if (isLocalTranscriptionBackend(transcriptionBackend)) {
+        for (const chunk of pendingChunks) {
+          await updateProcessingChunkResult(meetingId, chunk.index, "running").catch(() => {});
+          patchStoredChunk(chunk.index, { status: "running" });
+        }
+        let localResults: Awaited<ReturnType<typeof transcribeChunksWithLocalBackend>>;
+        try {
+          localResults = await transcribeChunksWithLocalBackend(transcriptionBackend, pendingChunks);
+        } catch (err) {
+          const message = formatError(err);
+          await Promise.all(
+            pendingChunks.map((chunk) =>
+              updateProcessingChunkResult(
                 meetingId,
                 chunk.index,
                 "error",
                 undefined,
-                formatError(err),
-              );
-              patchStoredChunk(chunk.index, { status: "error", errorMsg: formatError(err) });
-            }
-            throw err;
+                message,
+              ).catch(() => {}),
+            ),
+          );
+          for (const chunk of pendingChunks) {
+            patchStoredChunk(chunk.index, { status: "error", errorMsg: message });
           }
-        },
-        onChunkDone: (event) => {
-          transcribedAudioSec = completedAudioSec + event.completedAudioSec;
-          transcribedChunkCount = completedStoredChunks.length + event.completedChunks;
+          addLiveLog(meetingId, "error", `Falha na transcricao local: ${message}`);
+          throw err;
+        }
+        const localSegmentsByChunk = new Map(
+          localResults.map((result) => [result.index, result.segments]),
+        );
+        const collectedSegments: TranscriptionSegment[] = [];
+        for (const chunk of pendingChunks) {
+          const segments = localSegmentsByChunk.get(chunk.index) ?? [];
+          collectedSegments.push(...segments);
+          commitLiveState(meetingId, (state) =>
+            appendLiveTranscript(state, chunk.index, segments),
+          );
+          addLiveLog(meetingId, "success", `Chunk ${chunk.index + 1} transcrito localmente.`);
+          const rawSegmentsJson = JSON.stringify(segments);
+          segmentJsonByChunk.set(chunk.index, rawSegmentsJson);
+          const updatedChunk = patchStoredChunk(chunk.index, {
+            status: "done",
+            rawSegmentsJson,
+            errorMsg: null,
+          });
+          if (updatedChunk) {
+            scheduleFactExtraction(updatedChunk, segments);
+          }
+          await updateProcessingChunkResult(
+            meetingId,
+            chunk.index,
+            "done",
+            rawSegmentsJson,
+          );
+          transcribedAudioSec += chunk.durationSec;
+          transcribedChunkCount += 1;
           updatePipelineProgress(
             "transcribe",
             transcribedAudioSec,
@@ -1190,8 +1230,130 @@ export default function Processing() {
             transcribedChunkCount,
             storedChunks.length,
           );
-        },
-      });
+        }
+        newSegments = collectedSegments;
+      } else {
+        const remoteApiKey =
+          transcriptionBackend === "deepgram"
+            ? keys.deepgramApiKey
+            : transcriptionBackend === "cloudflare"
+              ? keys.cloudflareApiToken
+              : keys.groq;
+        newSegments = await transcribeChunksConcurrently({
+          chunks: pendingChunks,
+          apiKey: remoteApiKey,
+          concurrency: transcriptionConcurrencyForProfile(processingProfile),
+          transcribeChunk: async (audioPath, apiKey, offsetSec) => {
+            const chunk = pendingChunkByPath.get(audioPath);
+            if (chunk) {
+              await updateProcessingChunkResult(meetingId, chunk.index, "running");
+              patchStoredChunk(chunk.index, { status: "running" });
+            }
+            try {
+              let segments =
+                transcriptionBackend === "cloudflare"
+                  ? await transcribeChunkCloudflare(
+                      audioPath,
+                      keys.cloudflareAccountId,
+                      keys.cloudflareApiToken,
+                      offsetSec,
+                    )
+                  : transcriptionBackend === "deepgram"
+                    ? await transcribeChunkDeepgram(audioPath, keys.deepgramApiKey, offsetSec)
+                    : await transcribeChunk(audioPath, apiKey, offsetSec);
+              if (
+                transcriptionBackend === "cloudflare" &&
+                (keys.transcriptionProfile ?? "smart-low-cost") === "smart-low-cost" &&
+                keys.deepgramApiKey?.trim() &&
+                chunk
+              ) {
+                const risk = scoreCloudflareTranscriptRisk({
+                  durationSec: chunk.durationSec,
+                  segments,
+                });
+                if (risk.shouldEscalate) {
+                  addLiveLog(
+                    meetingId,
+                    "warning",
+                    `Chunk ${chunk.index + 1} enviado para correcao Deepgram: ${risk.reasons.join(", ")}.`,
+                  );
+                  try {
+                    segments = await transcribeChunkDeepgram(
+                      audioPath,
+                      keys.deepgramApiKey,
+                      offsetSec,
+                    );
+                    addLiveLog(
+                      meetingId,
+                      "success",
+                      `Chunk ${chunk.index + 1} corrigido com Deepgram.`,
+                    );
+                  } catch (correctionError) {
+                    addLiveLog(
+                      meetingId,
+                      "warning",
+                      `Correcao Deepgram falhou no chunk ${chunk.index + 1}; mantendo Cloudflare: ${formatError(correctionError)}`,
+                    );
+                  }
+                }
+              }
+              if (chunk) {
+                commitLiveState(meetingId, (state) =>
+                  appendLiveTranscript(state, chunk.index, segments),
+                );
+                addLiveLog(meetingId, "success", `Chunk ${chunk.index + 1} transcrito.`);
+              }
+              const rawSegmentsJson = JSON.stringify(segments);
+              if (chunk) {
+                segmentJsonByChunk.set(chunk.index, rawSegmentsJson);
+                const updatedChunk = patchStoredChunk(chunk.index, {
+                  status: "done",
+                  rawSegmentsJson,
+                  errorMsg: null,
+                });
+                if (updatedChunk) {
+                  scheduleFactExtraction(updatedChunk, segments);
+                }
+                await updateProcessingChunkResult(
+                  meetingId,
+                  chunk.index,
+                  "done",
+                  rawSegmentsJson,
+                );
+              }
+              return segments;
+            } catch (err) {
+              if (chunk) {
+                addLiveLog(
+                  meetingId,
+                  "error",
+                  `Falha na transcricao do chunk ${chunk.index + 1}: ${formatError(err)}`,
+                );
+                await updateProcessingChunkResult(
+                  meetingId,
+                  chunk.index,
+                  "error",
+                  undefined,
+                  formatError(err),
+                );
+                patchStoredChunk(chunk.index, { status: "error", errorMsg: formatError(err) });
+              }
+              throw err;
+            }
+          },
+          onChunkDone: (event) => {
+            transcribedAudioSec = completedAudioSec + event.completedAudioSec;
+            transcribedChunkCount = completedStoredChunks.length + event.completedChunks;
+            updatePipelineProgress(
+              "transcribe",
+              transcribedAudioSec,
+              totalAudioSec,
+              transcribedChunkCount,
+              storedChunks.length,
+            );
+          },
+        });
+      }
 
       const segments = mergeSortedTranscriptionSegments(completedSegments, newSegments);
       const meetingFactsPromise = closeFactInput();
@@ -1410,6 +1572,10 @@ export default function Processing() {
     }
   };
 
+  const visibleProcessingNotes = [transcriptionRouteNote, processingNote].filter(
+    (note, index, notes): note is string => Boolean(note) && notes.indexOf(note) === index,
+  );
+
   return (
     <div className="mx-auto max-w-5xl space-y-6">
       <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
@@ -1427,10 +1593,14 @@ export default function Processing() {
         </div>
       </header>
       <ProgressPipeline stepStatus={stepStatus} currentStep={currentStep} />
-      {processingNote && (
-        <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 text-sm leading-6 text-blue-900">
-          <span className="font-semibold">Motor de falantes: </span>
-          {processingNote}
+      {visibleProcessingNotes.length > 0 && (
+        <div className="space-y-1 rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 text-sm leading-6 text-blue-900">
+          {visibleProcessingNotes.map((note) => (
+            <p key={note}>
+              <span className="font-semibold">Motor ativo: </span>
+              {note}
+            </p>
+          ))}
         </div>
       )}
       <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">

@@ -7,6 +7,8 @@ benchmarks/runs/
 benchmarks/reports/
 .venv-diarize/
 .venv-pyannote/
+.venv-transcribe/
+.venv-parakeet/
 diarize.recovered*.rs
 .env
 .env.*

@@ -16,7 +16,11 @@ use meeting_minutes_lib::commands::generate::{
     extract_chunk_facts_with_client, generate_ata_from_facts_with_client,
     render_ata_from_facts_locally,
 };
-use meeting_minutes_lib::commands::transcribe::transcribe_chunk_with_client;
+use meeting_minutes_lib::commands::transcribe::{
+    transcribe_chunk_cloudflare_with_client, transcribe_chunk_deepgram_with_client,
+    transcribe_chunk_with_client, transcribe_chunks_with_faster_whisper,
+    transcribe_chunks_with_parakeet,
+};
 use meeting_minutes_lib::models::audio::{ExportedChunk, SmartChunkOptions};
 use meeting_minutes_lib::models::transcription::{
     DiarizedResult, DiarizedSegment, MeetingChunkInsights, TranscriptionSegment,
@@ -39,6 +43,8 @@ struct CliOptions {
     config: PathBuf,
     app_data_dir: PathBuf,
     reuse_transcription_from: Option<PathBuf>,
+    transcription_mode: TranscriptionMode,
+    transcription_model: String,
     transcribe_concurrency: usize,
     facts_concurrency: usize,
     chunk_target_sec: f64,
@@ -55,6 +61,42 @@ struct CliOptions {
 enum MinutesMode {
     Gemini,
     Local,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TranscriptionMode {
+    Groq,
+    Cloudflare,
+    Deepgram,
+    Local,
+    Parakeet,
+}
+
+impl TranscriptionMode {
+    fn from_option(value: Option<String>) -> Self {
+        match value
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("cloudflare") | Some("cloudflare-whisper") => Self::Cloudflare,
+            Some("deepgram") | Some("deepgram-nova") | Some("deepgram-nova-3") => Self::Deepgram,
+            Some("local") | Some("faster-whisper") | Some("faster_whisper") => Self::Local,
+            Some("parakeet") | Some("parakeet-local") | Some("parakeet_local") => Self::Parakeet,
+            _ => Self::Groq,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Groq => "groq",
+            Self::Cloudflare => "cloudflare",
+            Self::Deepgram => "deepgram",
+            Self::Local => "faster-whisper-local",
+            Self::Parakeet => "parakeet-local",
+        }
+    }
 }
 
 impl MinutesMode {
@@ -78,10 +120,13 @@ impl MinutesMode {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ApiKeys {
     groq: String,
     gemini: String,
+    cloudflare_account_id: String,
+    cloudflare_api_token: String,
+    deepgram_api_key: String,
 }
 
 fn arg_value(args: &[String], name: &str) -> Option<String> {
@@ -159,6 +204,15 @@ fn parse_cli() -> Result<CliOptions, String> {
         .unwrap_or(default_app_data_dir()?);
     let reuse_transcription_from =
         arg_value(&args, "--reuse-transcription-from").map(PathBuf::from);
+    let transcription_mode =
+        TranscriptionMode::from_option(arg_value(&args, "--transcription-mode"));
+    let transcription_model = arg_value(&args, "--transcription-model").unwrap_or_else(|| {
+        if transcription_mode == TranscriptionMode::Parakeet {
+            "parakeet".to_string()
+        } else {
+            "turbo".to_string()
+        }
+    });
     let expected_speakers =
         arg_value(&args, "--expected-speakers").and_then(|value| value.parse::<i32>().ok());
     let diarization_mode = DiarizationMode::from_option(arg_value(&args, "--diarization-mode"));
@@ -189,6 +243,8 @@ fn parse_cli() -> Result<CliOptions, String> {
         config,
         app_data_dir,
         reuse_transcription_from,
+        transcription_mode,
+        transcription_model,
         transcribe_concurrency: parse_positive_usize(
             arg_value(&args, "--transcribe-concurrency"),
             3,
@@ -205,29 +261,50 @@ fn parse_cli() -> Result<CliOptions, String> {
     })
 }
 
-fn load_api_keys(config_path: &Path) -> Result<ApiKeys, String> {
+fn config_value_or_env(value: &Value, config_key: &str, env_key: &str) -> String {
+    value
+        .get(config_key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| std::env::var(env_key).ok())
+        .unwrap_or_default()
+}
+
+fn load_api_keys(config_path: &Path, mode: TranscriptionMode) -> Result<ApiKeys, String> {
     let raw = std::fs::read_to_string(config_path)
         .map_err(|e| format!("Failed to read config at {}: {e}", config_path.display()))?;
     let value = serde_json::from_str::<Value>(&raw).map_err(|e| e.to_string())?;
-    let groq = value
-        .get("groq_api_key")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let gemini = value
-        .get("gemini_api_key")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
+    let groq = config_value_or_env(&value, "groq_api_key", "GROQ_API_KEY");
+    let gemini = config_value_or_env(&value, "gemini_api_key", "GEMINI_API_KEY");
+    let cloudflare_account_id =
+        config_value_or_env(&value, "cloudflare_account_id", "CLOUDFLARE_ACCOUNT_ID");
+    let cloudflare_api_token =
+        config_value_or_env(&value, "cloudflare_api_token", "CLOUDFLARE_API_TOKEN");
+    let deepgram_api_key = config_value_or_env(&value, "deepgram_api_key", "DEEPGRAM_API_KEY");
 
-    if groq.trim().is_empty() {
+    if mode == TranscriptionMode::Groq && groq.trim().is_empty() {
         return Err("Groq API key is missing in config".to_string());
+    }
+    if mode == TranscriptionMode::Cloudflare
+        && (cloudflare_account_id.trim().is_empty() || cloudflare_api_token.trim().is_empty())
+    {
+        return Err("Cloudflare credentials are missing in config/env".to_string());
+    }
+    if mode == TranscriptionMode::Deepgram && deepgram_api_key.trim().is_empty() {
+        return Err("Deepgram API key is missing in config/env".to_string());
     }
     if gemini.trim().is_empty() {
         return Err("Gemini API key is missing in config".to_string());
     }
 
-    Ok(ApiKeys { groq, gemini })
+    Ok(ApiKeys {
+        groq,
+        gemini,
+        cloudflare_account_id,
+        cloudflare_api_token,
+        deepgram_api_key,
+    })
 }
 
 fn run_ffmpeg(ffmpeg: &Path, args: &[String]) -> Result<String, String> {
@@ -419,7 +496,8 @@ fn export_refinement_windows_with_ffmpeg(
 
 async fn transcribe_chunks_concurrently(
     chunks: Vec<ExportedChunk>,
-    api_key: String,
+    keys: ApiKeys,
+    mode: TranscriptionMode,
     concurrency: usize,
 ) -> Result<Vec<TranscriptionSegment>, String> {
     if chunks.is_empty() {
@@ -433,7 +511,7 @@ async fn transcribe_chunks_concurrently(
 
     for _ in 0..worker_count {
         let queue = queue.clone();
-        let api_key = api_key.clone();
+        let keys = keys.clone();
         let client = client.clone();
         handles.push(tokio::spawn(async move {
             let mut local_results = Vec::new();
@@ -450,13 +528,37 @@ async fn transcribe_chunks_concurrently(
                     "[transcribe] chunk {} ({:.1}s)",
                     chunk.index, chunk.duration_sec
                 );
-                let segments = transcribe_chunk_with_client(
-                    &client,
-                    chunk.audio_path.clone(),
-                    api_key.clone(),
-                    chunk.offset_sec,
-                )
-                .await?;
+                let segments = match mode {
+                    TranscriptionMode::Groq => {
+                        transcribe_chunk_with_client(
+                            &client,
+                            chunk.audio_path.clone(),
+                            keys.groq.clone(),
+                            chunk.offset_sec,
+                        )
+                        .await?
+                    }
+                    TranscriptionMode::Cloudflare => {
+                        transcribe_chunk_cloudflare_with_client(
+                            &client,
+                            chunk.audio_path.clone(),
+                            keys.cloudflare_account_id.clone(),
+                            keys.cloudflare_api_token.clone(),
+                            chunk.offset_sec,
+                        )
+                        .await?
+                    }
+                    TranscriptionMode::Deepgram => {
+                        transcribe_chunk_deepgram_with_client(
+                            &client,
+                            chunk.audio_path.clone(),
+                            keys.deepgram_api_key.clone(),
+                            chunk.offset_sec,
+                        )
+                        .await?
+                    }
+                    TranscriptionMode::Local | TranscriptionMode::Parakeet => unreachable!(),
+                };
                 local_results.push((chunk.index, segments));
             }
             Ok::<Vec<(usize, Vec<TranscriptionSegment>)>, String>(local_results)
@@ -481,6 +583,21 @@ async fn transcribe_chunks_concurrently(
             segment
         })
         .collect())
+}
+
+fn flatten_local_transcription_results(
+    mut results: Vec<meeting_minutes_lib::commands::transcribe::LocalTranscriptionChunkResult>,
+) -> Vec<TranscriptionSegment> {
+    results.sort_by_key(|result| result.index);
+    results
+        .into_iter()
+        .flat_map(|result| result.segments)
+        .enumerate()
+        .map(|(id, mut segment)| {
+            segment.id = id as i32;
+            segment
+        })
+        .collect()
 }
 
 fn overlapping_diarized_segments(
@@ -594,7 +711,7 @@ fn read_transcription_segments(path: &Path) -> Result<Vec<TranscriptionSegment>,
 async fn main() -> Result<(), String> {
     let options = parse_cli()?;
     std::fs::create_dir_all(&options.out_dir).map_err(|e| e.to_string())?;
-    let keys = load_api_keys(&options.config)?;
+    let keys = load_api_keys(&options.config, options.transcription_mode)?;
     let mut stages = Vec::new();
     let total_started = Instant::now();
 
@@ -645,9 +762,40 @@ async fn main() -> Result<(), String> {
     let started = Instant::now();
     let transcript_segments = if let Some(reuse_dir) = &options.reuse_transcription_from {
         read_transcription_segments(&reuse_dir.join("transcription-segments.json"))?
+    } else if matches!(
+        options.transcription_mode,
+        TranscriptionMode::Local | TranscriptionMode::Parakeet
+    ) {
+        let local_results = match options.transcription_mode {
+            TranscriptionMode::Local => {
+                transcribe_chunks_with_faster_whisper(
+                    chunks.clone(),
+                    Some(options.transcription_model.clone()),
+                )
+                .await?
+            }
+            TranscriptionMode::Parakeet => {
+                transcribe_chunks_with_parakeet(
+                    chunks.clone(),
+                    Some(options.transcription_model.clone()),
+                )
+                .await?
+            }
+            TranscriptionMode::Groq
+            | TranscriptionMode::Cloudflare
+            | TranscriptionMode::Deepgram => {
+                unreachable!()
+            }
+        };
+        flatten_local_transcription_results(local_results)
     } else {
-        transcribe_chunks_concurrently(chunks.clone(), keys.groq, options.transcribe_concurrency)
-            .await?
+        transcribe_chunks_concurrently(
+            chunks.clone(),
+            keys.clone(),
+            options.transcription_mode,
+            options.transcribe_concurrency,
+        )
+        .await?
     };
     stage_push(
         &mut stages,
@@ -854,14 +1002,16 @@ async fn main() -> Result<(), String> {
     let wall_clock_sec = total_started.elapsed().as_secs_f64();
     let speed = compute_benchmark_speed(audio_duration_sec, wall_clock_sec)?;
     notes.push(format!(
-        "Benchmark config: target_sec={:.0}, min_sec={:.0}, max_sec={:.0}, overlap_sec={:.1}, minutes_mode={}, facts_concurrency={}, transcribe_concurrency={}.",
+        "Benchmark config: target_sec={:.0}, min_sec={:.0}, max_sec={:.0}, overlap_sec={:.1}, minutes_mode={}, facts_concurrency={}, transcribe_concurrency={}, transcription_mode={}, transcription_model={}.",
         options.chunk_target_sec,
         options.chunk_min_sec,
         options.chunk_max_sec,
         options.chunk_overlap_sec,
         options.minutes_mode.label(),
         options.facts_concurrency,
-        options.transcribe_concurrency
+        options.transcribe_concurrency,
+        options.transcription_mode.label(),
+        options.transcription_model
     ));
     if let Ok(budget) = std::env::var("MEETING_MINUTES_GEMINI_THINKING_BUDGET") {
         notes.push(format!("Gemini thinking budget env: {budget}."));

@@ -1360,7 +1360,10 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "-vn"));
         assert!(args.windows(2).any(|pair| pair == ["-ss", "12.500"]));
         assert!(args.windows(2).any(|pair| pair == ["-t", "32.500"]));
-        assert_eq!(args.last().map(String::as_str), Some("chunks/chunk_002.flac"));
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("chunks/chunk_002.flac")
+        );
     }
 
     #[test]

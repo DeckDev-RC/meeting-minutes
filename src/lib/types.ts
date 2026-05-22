@@ -2,6 +2,13 @@ export type MeetingStatus = 'pending' | 'processing' | 'done' | 'error';
 
 export type ProcessingProfile = 'turbo' | 'balanced' | 'precision';
 
+export type TranscriptionRoutingProfile =
+  | 'smart-low-cost'
+  | 'max-quality'
+  | 'groq-turbo'
+  | 'offline-free'
+  | 'manual';
+
 export type JobStep =
   | 'extract_audio'
   | 'transcribe'
@@ -104,6 +111,11 @@ export interface ExportedChunk {
   endSec: number;
   offsetSec: number;
   durationSec: number;
+}
+
+export interface LocalTranscriptionChunkResult {
+  index: number;
+  segments: TranscriptionSegment[];
 }
 
 export interface SmartChunkOptions {
