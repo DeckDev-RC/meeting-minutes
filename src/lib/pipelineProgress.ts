@@ -155,6 +155,16 @@ export function derivePipelineProgress(input: PipelineProgressInput): PipelinePr
   }
 
   if (input.phase === 'extract_facts') {
+    if (totalChunks > 0 && completedChunks >= totalChunks) {
+      return {
+        percent,
+        title: 'Aguardando falantes',
+        detail: 'Fatos extraidos. Finalizando a identificacao de falantes antes de montar a ata.',
+        etaLabel: '',
+        speedLabel: '',
+      };
+    }
+
     return {
       percent,
       title: PHASE_TITLES[input.phase],

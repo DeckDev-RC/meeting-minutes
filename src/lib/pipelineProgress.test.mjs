@@ -148,6 +148,24 @@ assert.deepEqual(
 
 assert.deepEqual(
   derivePipelineProgress({
+    phase: "extract_facts",
+    completedAudioSec: 993,
+    totalAudioSec: 993,
+    completedChunks: 3,
+    totalChunks: 3,
+    elapsedMs: 7249,
+  }),
+  {
+    percent: 92,
+    title: "Aguardando falantes",
+    detail: "Fatos extraidos. Finalizando a identificacao de falantes antes de montar a ata.",
+    etaLabel: "",
+    speedLabel: "",
+  }
+);
+
+assert.deepEqual(
+  derivePipelineProgress({
     phase: "complete",
     completedAudioSec: Number.POSITIVE_INFINITY,
     totalAudioSec: Number.POSITIVE_INFINITY,

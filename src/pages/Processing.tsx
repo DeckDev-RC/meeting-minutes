@@ -39,6 +39,10 @@ import {
   transcriptionConcurrencyForProfile,
 } from "../lib/processingConcurrency";
 import {
+  resolveDiarizationExpectedSpeakers,
+  shouldPreferChunkedDiarization,
+} from "../lib/speakerCount";
+import {
   applyLiveTranscriptSpeakers,
   appendLiveInsights,
   appendLiveLog,
@@ -717,6 +721,12 @@ export default function Processing() {
       }
       const processingProfile = normalizeProcessingProfile(meeting.processingProfile);
       const participantNames = parseParticipantsHint(meeting.participantsHint);
+      const diarizationExpectedSpeakers = resolveDiarizationExpectedSpeakers(
+        keys.expectedSpeakers,
+        participantNames,
+      );
+      const inferredExpectedSpeakers =
+        !keys.expectedSpeakers && diarizationExpectedSpeakers !== undefined;
       liveProcessingParticipantNames.set(meetingId, participantNames);
       const meetingMetadata = await probeMediaMetadata(meeting.filePath).catch((err) => {
         console.warn("Failed to probe media metadata:", err);
@@ -725,15 +735,23 @@ export default function Processing() {
           sourceFileName: meeting.filePath.split(/[\\/]/).pop() || null,
         };
       });
-      setRunProfile(processingProfile);
-      setProcessingNote(
-        processingProfile === "precision"
+      const speakerProcessingNote = diarizationExpectedSpeakers
+        ? `Motor CPU moderno com ${diarizationExpectedSpeakers} falantes esperados; usa blocos quando possivel.`
+        : processingProfile === "precision"
           ? "Precisao: CPU moderno em blocos quando ha numero esperado de falantes; depois refina trechos suspeitos."
           : processingProfile === "turbo"
             ? "Turbo: chunks sem overlap para exportacao em lote, transcricao mais concorrente e sem refinamento seletivo."
-            : "Motor CPU moderno ativo para identificar falantes em paralelo.",
-      );
+            : "Motor CPU moderno ativo para identificar falantes em paralelo.";
+      setRunProfile(processingProfile);
+      setProcessingNote(speakerProcessingNote);
       addLiveLog(meetingId, "info", `Perfil ${PROFILE_LABELS[processingProfile]} selecionado.`);
+      if (inferredExpectedSpeakers) {
+        addLiveLog(
+          meetingId,
+          "info",
+          `Numero esperado de falantes inferido pelos participantes informados: ${diarizationExpectedSpeakers}.`,
+        );
+      }
 
       if (meeting.status === "done") {
         setStepStatus("extract_audio", "done");
@@ -1065,13 +1083,32 @@ export default function Processing() {
       setStepStatus("extract_audio", "done");
       setStepStatus("diarize", "running");
       addLiveLog(meetingId, "info", "Identificacao de falantes iniciada em paralelo.");
+      const preferChunkedSpeakerTurns = shouldPreferChunkedDiarization(
+        diarizationExpectedSpeakers,
+        exportedChunks.length,
+      );
+      if (preferChunkedSpeakerTurns) {
+        addLiveLog(meetingId, "info", "Diarizacao CPU em blocos ativada para esta reuniao.");
+        setProcessingNote(
+          `CPU moderno em blocos ativo com ${diarizationExpectedSpeakers} falantes esperados.`,
+        );
+      }
+      const speakerTurnsStartedAt = Date.now();
       const speakerTurnsPromise = startSpeculativeSpeakerTurns(
         audioOutput,
-        keys.expectedSpeakers,
+        diarizationExpectedSpeakers,
         exportedChunks,
-        processingProfile === "precision",
+        preferChunkedSpeakerTurns,
         false,
-      );
+      ).then((result) => {
+        const elapsedSec = (Date.now() - speakerTurnsStartedAt) / 1000;
+        addLiveLog(
+          meetingId,
+          result.error ? "warning" : "success",
+          `Motor de falantes ${result.engine} concluiu em ${elapsedSec.toFixed(1)}s.`,
+        );
+        return result;
+      });
 
       // Step 2: Transcribe pending chunks.
       setStep("transcribe");
@@ -1209,7 +1246,7 @@ export default function Processing() {
               speakerTurnsJson,
               exportedChunks,
               {
-                expectedSpeakers: keys.expectedSpeakers,
+                expectedSpeakers: diarizationExpectedSpeakers,
                 maxRefinementChunks,
               },
             );
@@ -1229,7 +1266,7 @@ export default function Processing() {
               : processingProfile === "precision"
                 ? "precise"
                 : "auto",
-          expectedSpeakers: keys.expectedSpeakers,
+          expectedSpeakers: diarizationExpectedSpeakers,
         });
         setStepStatus("diarize", "done");
         if (fallback.telemetry) {
