@@ -1479,12 +1479,6 @@ pub async fn diarize_with_mode_report(
             let chunks = audio_chunks.ok_or_else(|| {
                 "Modern CPU chunked diarization requires audio chunks".to_string()
             })?;
-            if expected_speakers.unwrap_or(0) <= 0 {
-                return Err(
-                    "Modern CPU chunked diarization requires expectedSpeakers for stable labels"
-                        .to_string(),
-                );
-            }
             let result = diarize_audio_chunks_with_modern_cpu(
                 chunks,
                 segments.as_ref().clone(),

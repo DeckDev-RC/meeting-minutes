@@ -54,8 +54,8 @@ import {
   transcriptionBackendLabel,
 } from "../lib/transcriptionProvider";
 import {
+  buildDiarizationPlan,
   resolveDiarizationExpectedSpeakers,
-  shouldPreferChunkedDiarization,
 } from "../lib/speakerCount";
 import {
   applyLiveTranscriptSpeakers,
@@ -75,6 +75,7 @@ import {
 } from "../lib/liveProcessingCache";
 import type {
   ExportedChunk,
+  DiarizedResult,
   MeetingChunkInsights,
   ProcessingProfile,
   ProcessingChunkRecord,
@@ -98,7 +99,7 @@ const LIVE_STATE_PUBLISH_INTERVAL_MS = 160;
 const COMPLETED_SNAPSHOT_TTL_MS = 10 * 60 * 1000;
 const COMPLETED_SNAPSHOT_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 const MAX_LIVE_PROCESSING_SNAPSHOTS = 5;
-const MAX_CHUNKED_DIARIZATION_WORKERS = 3;
+const MAX_CHUNKED_DIARIZATION_WORKERS = 6;
 
 type MinutesStreamPayload = {
   meetingId: string;
@@ -343,8 +344,14 @@ const startSpeculativeSpeakerTurns = (
   preferChunked = false,
   preferPyannote = false,
 ): Promise<SpeculativeSpeakerTurns> => {
-  if (preferChunked && expectedSpeakers && audioChunks.length > 1) {
-    const workerCount = Math.min(MAX_CHUNKED_DIARIZATION_WORKERS, audioChunks.length);
+  if (preferChunked && audioChunks.length > 1) {
+    const logicalCores =
+      typeof navigator === "undefined" ? 8 : navigator.hardwareConcurrency || 8;
+    const recommendedWorkers = Math.min(
+      MAX_CHUNKED_DIARIZATION_WORKERS,
+      Math.max(3, Math.floor(logicalCores / 3)),
+    );
+    const workerCount = Math.min(recommendedWorkers, audioChunks.length);
     return diarizeAudioTurnsModernCpuChunked(audioChunks, expectedSpeakers, workerCount)
       .then((turns) => ({ turns, error: "", engine: "modern-cpu-chunked" as const }))
       .catch((chunkedErr) =>
@@ -768,7 +775,7 @@ export default function Processing() {
       const speakerProcessingNote = diarizationExpectedSpeakers
         ? `Motor CPU moderno com ${diarizationExpectedSpeakers} falantes esperados; usa blocos quando possivel.`
         : processingProfile === "precision"
-          ? "Precisao: CPU moderno em blocos quando ha numero esperado de falantes; depois refina trechos suspeitos."
+          ? "Precisao: estrategia de falantes definida apos preparar os blocos; depois refina trechos suspeitos."
           : processingProfile === "turbo"
             ? "Turbo: chunks sem overlap para exportacao em lote, transcricao mais concorrente e sem refinamento seletivo."
             : "Motor CPU moderno ativo para identificar falantes em paralelo.";
@@ -1113,22 +1120,30 @@ export default function Processing() {
       setStepStatus("extract_audio", "done");
       setStepStatus("diarize", "running");
       addLiveLog(meetingId, "info", "Identificacao de falantes iniciada em paralelo.");
-      const preferChunkedSpeakerTurns = shouldPreferChunkedDiarization(
-        diarizationExpectedSpeakers,
-        exportedChunks.length,
-      );
-      if (preferChunkedSpeakerTurns) {
-        addLiveLog(meetingId, "info", "Diarizacao CPU em blocos ativada para esta reuniao.");
-        setProcessingNote(
-          `CPU moderno em blocos ativo com ${diarizationExpectedSpeakers} falantes esperados.`,
+      const diarizationPlan = buildDiarizationPlan({
+        expectedSpeakers: diarizationExpectedSpeakers,
+        audioChunkCount: exportedChunks.length,
+        totalAudioSec,
+      });
+      if (diarizationPlan.preferChunked) {
+        addLiveLog(
+          meetingId,
+          "info",
+          diarizationPlan.strategy === "chunked-auto"
+            ? "Diarizacao CPU em blocos automaticos ativada para audio longo sem numero esperado de falantes."
+            : "Diarizacao CPU em blocos ativada para esta reuniao.",
         );
+        if (diarizationPlan.warning) {
+          addLiveLog(meetingId, "warning", diarizationPlan.warning);
+        }
+        setProcessingNote(diarizationPlan.note);
       }
       const speakerTurnsStartedAt = Date.now();
       const speakerTurnsPromise = startSpeculativeSpeakerTurns(
         audioOutput,
         diarizationExpectedSpeakers,
         exportedChunks,
-        preferChunkedSpeakerTurns,
+        diarizationPlan.preferChunked,
         false,
       ).then((result) => {
         const elapsedSec = (Date.now() - speakerTurnsStartedAt) / 1000;
@@ -1536,7 +1551,9 @@ export default function Processing() {
           setProcessingNote("Pyannote Community-1 ativo nesta reuniao.");
         } else if (speculative.engine === "modern-cpu-chunked") {
           setProcessingNote(
-            "CPU moderno em blocos ativo; falantes normalizados pelo numero esperado.",
+            diarizationPlan.strategy === "chunked-auto"
+              ? "CPU moderno em blocos automatico; falantes detectados e costurados por centroides."
+              : "CPU moderno em blocos ativo; falantes normalizados pelo numero esperado.",
           );
         } else if (speculative.engine === "modern-cpu") {
           setProcessingNote(
@@ -1550,6 +1567,17 @@ export default function Processing() {
           setProcessingNote(`Pyannote indisponivel: ${speculative.fallbackReason}`);
         }
 
+        const warnIfAutoChunkedFragmented = (result: DiarizedResult) => {
+          if (diarizationPlan.strategy !== "chunked-auto" || result.speakers.length <= 12) {
+            return;
+          }
+          addLiveLog(
+            meetingId,
+            "warning",
+            `Diarizacao automatica encontrou ${result.speakers.length} rotulos de falantes; informe o numero esperado para reduzir fragmentacao.`,
+          );
+        };
+
         if (speculative.turns.length > 0) {
           const speakerTurnsJson = JSON.stringify(speculative.turns);
           try {
@@ -1558,6 +1586,7 @@ export default function Processing() {
                 segmentsJson,
                 speakerTurnsJson,
               );
+              warnIfAutoChunkedFragmented(aligned);
               setStepStatus("diarize", "done");
               addLiveLog(meetingId, "success", "Falantes alinhados.");
               return aligned;
@@ -1573,6 +1602,7 @@ export default function Processing() {
                 maxRefinementChunks,
               },
             );
+            warnIfAutoChunkedFragmented(refined);
             setStepStatus("diarize", "done");
             addLiveLog(meetingId, "success", "Falantes refinados nos trechos suspeitos.");
             return refined;
@@ -1591,6 +1621,7 @@ export default function Processing() {
                 : "auto",
           expectedSpeakers: diarizationExpectedSpeakers,
         });
+        warnIfAutoChunkedFragmented(fallback);
         setStepStatus("diarize", "done");
         if (fallback.telemetry) {
           addLiveLog(

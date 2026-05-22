@@ -38,6 +38,7 @@ const compile = spawnSync(
 assert.equal(compile.status, 0, compile.stdout + compile.stderr);
 
 const {
+  buildDiarizationPlan,
   inferExpectedSpeakersFromParticipants,
   resolveDiarizationExpectedSpeakers,
   shouldPreferChunkedDiarization,
@@ -57,8 +58,26 @@ assert.equal(
     "P7",
     "P8",
     "P9",
+    "P10",
+    "P11",
+    "P12",
+    "P13",
   ]),
   undefined,
+);
+assert.equal(
+  inferExpectedSpeakersFromParticipants([
+    "P1",
+    "P2",
+    "P3",
+    "P4",
+    "P5",
+    "P6",
+    "P7",
+    "P8",
+    "P9",
+  ]),
+  9,
 );
 
 assert.equal(resolveDiarizationExpectedSpeakers(3, ["Caio", "Emanuella"]), 3);
@@ -68,3 +87,28 @@ assert.equal(resolveDiarizationExpectedSpeakers(1, ["Caio", "Emanuella"]), 2);
 assert.equal(shouldPreferChunkedDiarization(2, 3), true);
 assert.equal(shouldPreferChunkedDiarization(undefined, 3), false);
 assert.equal(shouldPreferChunkedDiarization(2, 1), false);
+
+assert.deepEqual(
+  buildDiarizationPlan({
+    expectedSpeakers: 2,
+    audioChunkCount: 3,
+    totalAudioSec: 16 * 60,
+  }).strategy,
+  "chunked-known",
+);
+assert.equal(
+  buildDiarizationPlan({
+    expectedSpeakers: undefined,
+    audioChunkCount: 31,
+    totalAudioSec: 184 * 60,
+  }).strategy,
+  "chunked-auto",
+);
+assert.equal(
+  buildDiarizationPlan({
+    expectedSpeakers: undefined,
+    audioChunkCount: 3,
+    totalAudioSec: 16 * 60,
+  }).strategy,
+  "full-audio",
+);

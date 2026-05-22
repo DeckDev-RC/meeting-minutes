@@ -2,8 +2,6 @@ import json
 import argparse
 import concurrent.futures
 import importlib.metadata
-import os
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -159,6 +157,7 @@ class ReusableDiarizeEngine:
     def __init__(self, speaker_factory=None):
         self._speaker_factory = speaker_factory
         self._speaker = None
+        self._vad_model = None
 
     @property
     def speaker(self):
@@ -171,8 +170,79 @@ class ReusableDiarizeEngine:
                 self._speaker = wespeaker_rt.Speaker(lang="en")
         return self._speaker
 
+    @property
+    def vad_model(self):
+        if self._vad_model is None:
+            from silero_vad import load_silero_vad
+
+            self._vad_model = load_silero_vad()
+        return self._vad_model
+
     def __call__(self, audio_path, **kwargs):
         return self.diarize(audio_path, **kwargs)
+
+    def read_audio_for_vad(self, audio_path, sampling_rate=16000):
+        import numpy as np
+        import soundfile as sf
+        import torch
+
+        audio_data, sample_rate = sf.read(str(audio_path), dtype="float32")
+        if audio_data.ndim > 1:
+            audio_data = audio_data.mean(axis=1)
+
+        wav = torch.from_numpy(np.ascontiguousarray(audio_data))
+        if sample_rate != sampling_rate:
+            import torchaudio
+
+            wav = torchaudio.transforms.Resample(sample_rate, sampling_rate)(wav)
+        return wav
+
+    def run_vad(self, audio_path):
+        from diarize.utils import SpeechSegment
+        from silero_vad import get_speech_timestamps
+
+        wav = self.read_audio_for_vad(audio_path)
+        speech_timestamps = get_speech_timestamps(
+            wav,
+            self.vad_model,
+            sampling_rate=16000,
+            threshold=0.45,
+            min_speech_duration_ms=200,
+            min_silence_duration_ms=50,
+            speech_pad_ms=20,
+            return_seconds=True,
+        )
+        return [SpeechSegment(start=ts["start"], end=ts["end"]) for ts in speech_timestamps]
+
+    def extract_embedding_from_audio(self, segment_audio, sample_rate):
+        import numpy as np
+        import torch
+        import torchaudio
+        import torchaudio.compliance.kaldi as kaldi
+
+        if len(segment_audio) == 0:
+            return None
+
+        waveform = torch.from_numpy(np.ascontiguousarray(segment_audio, dtype=np.float32)).unsqueeze(0)
+        if sample_rate != 16000:
+            waveform = torchaudio.transforms.Resample(sample_rate, 16000)(waveform)
+            sample_rate = 16000
+        waveform = waveform * (1 << 15)
+        features = kaldi.fbank(
+            waveform,
+            num_mel_bins=80,
+            frame_length=25,
+            frame_shift=10,
+            dither=0.0,
+            sample_frequency=sample_rate,
+            window_type="hamming",
+            use_energy=False,
+        ).numpy()
+        if features.size == 0:
+            return None
+        features = features - np.mean(features, axis=0)
+        features = np.expand_dims(features, 0)
+        return self.speaker.extract_embedding_feat(features)
 
     def extract_embeddings(self, audio_path, speech_segments):
         import numpy as np
@@ -206,20 +276,10 @@ class ReusableDiarizeEngine:
                 end_sample = int(window_end * sample_rate)
                 segment_audio = audio_data[start_sample:end_sample]
 
-                tmp_path = None
                 try:
-                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                        tmp_path = tmp.name
-                        sf.write(tmp_path, segment_audio, sample_rate)
-                    embedding = self.speaker.extract_embedding(tmp_path)
+                    embedding = self.extract_embedding_from_audio(segment_audio, sample_rate)
                 except Exception:
                     continue
-                finally:
-                    if tmp_path is not None:
-                        try:
-                            os.unlink(tmp_path)
-                        except OSError:
-                            pass
 
                 if embedding is not None:
                     embedding = np.asarray(embedding)
@@ -245,7 +305,6 @@ class ReusableDiarizeEngine:
         from diarize import _build_diarization_segments
         from diarize.clustering import cluster_speakers
         from diarize.utils import get_audio_duration
-        from diarize.vad import run_vad
 
         if min_speakers < 1:
             raise ValueError(f"min_speakers must be >= 1, got {min_speakers}")
@@ -258,7 +317,7 @@ class ReusableDiarizeEngine:
 
         audio_path = str(audio_path)
         duration = get_audio_duration(audio_path)
-        speech_segments = run_vad(audio_path)
+        speech_segments = self.run_vad(audio_path)
         if not speech_segments:
             return SimpleNamespace(audio_duration=duration, segments=[], speaker_centroids={})
 
@@ -501,13 +560,14 @@ def run_backend_batch(
         raise RuntimeError("--chunks-json must contain a JSON array")
     safe_workers = normalize_max_workers(max_workers, len(chunks))
     return run_backend_batch_with_diarize(
-        load_diarize_function(),
+        None,
         chunks,
         output_dir,
         num_speakers=num_speakers,
         min_speakers=min_speakers,
         max_speakers=max_speakers,
         max_workers=safe_workers,
+        diarize_factory=load_diarize_function,
     )
 
 

@@ -12,6 +12,10 @@ import {
   type TranscriptionBudgetProfile,
   type TranscriptionPreflight,
 } from "../lib/transcriptionPreflight";
+import {
+  buildDiarizationPlan,
+  resolveDiarizationExpectedSpeakers,
+} from "../lib/speakerCount";
 import type { ProcessingProfile } from "../lib/types";
 import { useMeetingStore } from "../store/meetingStore";
 
@@ -69,6 +73,13 @@ const formatDuration = (durationSec: number) => {
 };
 
 const formatUsd = (amount: number) => `US$ ${amount.toFixed(2)}`;
+
+const parseParticipantsHint = (hint: string) =>
+  hint
+    .split(/[\n,;]+/)
+    .map((name) => name.trim())
+    .filter(Boolean)
+    .slice(0, 30);
 
 export default function Upload() {
   const navigate = useNavigate();
@@ -150,6 +161,20 @@ export default function Upload() {
       cloudflareQuotaExhaustedToday: cloudflareQuotaState.isExhaustedToday,
     });
   }, [apiKeys, budgetProfile, cloudflareQuotaState.isExhaustedToday, durationSec]);
+
+  const speakerPlan = useMemo(() => {
+    if (!apiKeys || !durationSec) return null;
+    const participantNames = parseParticipantsHint(participantsHint);
+    const expectedSpeakers = resolveDiarizationExpectedSpeakers(
+      apiKeys.expectedSpeakers,
+      participantNames,
+    );
+    return buildDiarizationPlan({
+      expectedSpeakers,
+      audioChunkCount: Math.max(1, Math.ceil(durationSec / 360)),
+      totalAudioSec: durationSec,
+    });
+  }, [apiKeys, durationSec, participantsHint]);
 
   const handleProcess = async () => {
     if (!filePath) return;
@@ -287,7 +312,7 @@ export default function Upload() {
                     {preflight?.quotaRisk.label ?? "Calculando"}
                   </span>
                 </div>
-                <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-5">
+                <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-6">
                   <div>
                     <dt className="text-xs font-medium uppercase tracking-wide text-gray-500">
                       Duracao
@@ -330,7 +355,20 @@ export default function Upload() {
                         : "Calculando"}
                     </dd>
                   </div>
+                  <div>
+                    <dt className="text-xs font-medium uppercase tracking-wide text-gray-500">
+                      Falantes
+                    </dt>
+                    <dd className="mt-1 font-semibold text-gray-900">
+                      {speakerPlan?.label ?? "Calculando"}
+                    </dd>
+                  </div>
                 </dl>
+                {speakerPlan?.warning && (
+                  <p className="mt-3 text-xs leading-5 text-amber-700">
+                    {speakerPlan.warning}
+                  </p>
+                )}
               </div>
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <p className="text-sm text-gray-500">Tudo certo para iniciar o processamento.</p>

@@ -316,7 +316,7 @@ export default function Settings() {
             className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm shadow-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
           >
             <option value="">Nao sei, detectar automaticamente</option>
-            {[2, 3, 4, 5, 6, 7, 8].map((count) => (
+            {[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((count) => (
               <option key={count} value={count}>
                 {count} falantes
               </option>
