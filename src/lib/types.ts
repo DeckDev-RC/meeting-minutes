@@ -41,6 +41,15 @@ export interface MeetingMetadata {
   durationSec?: number | null;
 }
 
+export interface MinutesData {
+  id: string;
+  meeting_id: string;
+  html_content: string;
+  pdf_path: string | null;
+  model_used: string;
+  created_at: string;
+}
+
 export interface TranscriptionSegment {
   id: number;
   start: number;

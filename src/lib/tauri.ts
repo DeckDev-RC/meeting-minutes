@@ -6,6 +6,7 @@ import type {
   LocalTranscriptionChunkResult,
   Meeting,
   MeetingMetadata,
+  MinutesData,
   MeetingChunkInsights,
   ProcessingChunkRecord,
   SilenceRange,
@@ -302,6 +303,9 @@ export const saveTranscription = (meetingId: string, rawWhisper: string, diarize
 
 export const saveMinutes = (meetingId: string, htmlContent: string, pdfPath?: string) =>
   invoke<void>('save_minutes', { meetingId, htmlContent, pdfPath, modelUsed: 'gemini-2.5-flash' });
+
+export const getMinutesByMeeting = (meetingId: string) =>
+  invoke<MinutesData | null>('get_minutes_by_meeting', { meetingId });
 
 export const savePdf = (pdfBytes: number[], suggestedName: string) =>
   invoke<string>('save_pdf', { pdfBytes, suggestedName });

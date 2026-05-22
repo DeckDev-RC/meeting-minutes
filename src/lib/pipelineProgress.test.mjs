@@ -138,11 +138,11 @@ assert.deepEqual(
     elapsedMs: 7249,
   }),
   {
-    percent: 92,
+    percent: 93,
     title: "Extraindo decisoes e acoes",
     detail: "Lendo 2 de 3 blocos para separar decisoes, tarefas, riscos e perguntas.",
-    etaLabel: "",
-    speedLabel: "",
+    etaLabel: "2 de 3 blocos de insights",
+    speedLabel: "67% dos insights",
   }
 );
 
@@ -156,11 +156,29 @@ assert.deepEqual(
     elapsedMs: 7249,
   }),
   {
-    percent: 92,
+    percent: 95,
     title: "Aguardando falantes",
-    detail: "Fatos extraidos. Finalizando a identificacao de falantes antes de montar a ata.",
-    etaLabel: "",
-    speedLabel: "",
+    detail: "3 de 3 blocos de insights prontos. Falantes ainda em processamento antes da ata.",
+    etaLabel: "Insights completos",
+    speedLabel: "Tempo total 0m07s",
+  }
+);
+
+assert.deepEqual(
+  derivePipelineProgress({
+    phase: "wait_speakers",
+    completedAudioSec: 993,
+    totalAudioSec: 993,
+    completedChunks: 3,
+    totalChunks: 3,
+    elapsedMs: 160_000,
+  }),
+  {
+    percent: 96,
+    title: "Aguardando falantes",
+    detail: "Insights prontos. Mantendo a ata em espera ate a identificacao de falantes terminar.",
+    etaLabel: "Falantes em andamento",
+    speedLabel: "Tempo total 2m40s",
   }
 );
 

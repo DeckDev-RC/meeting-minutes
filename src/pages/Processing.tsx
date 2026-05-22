@@ -593,6 +593,14 @@ export default function Processing() {
     ],
     [hasMinutesPreview, insightCount, logCount, transcriptCount],
   );
+  const liveInsightTotals = useMemo(
+    () => ({
+      decisions: liveState.insights.reduce((sum, item) => sum + item.decisionCount, 0),
+      actions: liveState.insights.reduce((sum, item) => sum + item.actionCount, 0),
+      risks: liveState.insights.reduce((sum, item) => sum + item.riskCount, 0),
+    }),
+    [liveState.insights],
+  );
 
   useEffect(() => {
     if (liveTab !== "transcript") return;
@@ -1601,11 +1609,46 @@ export default function Processing() {
         addLiveLog(meetingId, "error", `Falha na diarizacao: ${formatError(err)}`);
         throw err;
       });
+      let diarizationComplete = false;
+      let waitingForSpeakersTimer: ReturnType<typeof window.setInterval> | null = null;
+      const stopWaitingForSpeakersProgress = () => {
+        if (waitingForSpeakersTimer) {
+          window.clearInterval(waitingForSpeakersTimer);
+          waitingForSpeakersTimer = null;
+        }
+      };
+      const startWaitingForSpeakersProgress = () => {
+        if (waitingForSpeakersTimer || diarizationComplete) return;
+        addLiveLog(
+          meetingId,
+          "info",
+          "Insights prontos; aguardando a identificacao de falantes terminar.",
+        );
+        updatePipelineProgress(
+          "wait_speakers",
+          totalAudioSec,
+          totalAudioSec,
+          storedChunks.length,
+          storedChunks.length,
+        );
+        waitingForSpeakersTimer = window.setInterval(() => {
+          updatePipelineProgress(
+            "wait_speakers",
+            totalAudioSec,
+            totalAudioSec,
+            storedChunks.length,
+            storedChunks.length,
+          );
+        }, 5000);
+      };
       const diarizedWithLiveSpeakersPromise = diarizedPromise.then((diarized) => {
         commitLiveState(meetingId, (state) =>
           applyLiveTranscriptSpeakers(state, diarized.segments),
         );
         return diarized;
+      }).finally(() => {
+        diarizationComplete = true;
+        stopWaitingForSpeakersProgress();
       });
 
       // Step 4: Extract compact facts per chunk without waiting for speaker alignment.
@@ -1624,10 +1667,16 @@ export default function Processing() {
       setLiveTab("insights");
       reportFactProgress();
 
+      const meetingFactsWithWaitPromise = meetingFactsPromise.then((facts) => {
+        if (!diarizationComplete) {
+          startWaitingForSpeakersProgress();
+        }
+        return facts;
+      });
       const [diarized, meetingFacts] = await Promise.all([
         diarizedWithLiveSpeakersPromise,
-        meetingFactsPromise,
-      ]);
+        meetingFactsWithWaitPromise,
+      ]).finally(stopWaitingForSpeakersProgress);
       const diarizedJson = JSON.stringify(diarized);
       const diarizedSpeakersJson = JSON.stringify(diarized.speakers);
       const meetingFactsJson = JSON.stringify(meetingFacts);
@@ -1787,6 +1836,27 @@ export default function Processing() {
                 <dd className="mt-1 text-sm font-semibold text-gray-800">{progressSpeed}</dd>
               </div>
             )}
+          </dl>
+        )}
+
+        {(transcriptCount > 0 || insightCount > 0 || logCount > 0) && (
+          <dl className="mb-4 grid gap-2 sm:grid-cols-5">
+            {[
+              ["Trechos", transcriptCount],
+              ["Insights", insightCount],
+              ["Decisoes", liveInsightTotals.decisions],
+              ["Acoes", liveInsightTotals.actions],
+              ["Riscos", liveInsightTotals.risks],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded-lg border border-gray-100 bg-gray-50 px-3 py-2">
+                <dt className="text-xs font-medium uppercase tracking-wide text-gray-500">
+                  {label}
+                </dt>
+                <dd className="mt-1 text-sm font-semibold tabular-nums text-gray-800">
+                  {value}
+                </dd>
+              </div>
+            ))}
           </dl>
         )}
 

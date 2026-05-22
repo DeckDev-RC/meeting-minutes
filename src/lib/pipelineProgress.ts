@@ -5,6 +5,7 @@ export type PipelinePhase =
   | 'transcribe'
   | 'diarize'
   | 'extract_facts'
+  | 'wait_speakers'
   | 'generate'
   | 'complete';
 
@@ -32,6 +33,7 @@ const PHASE_TITLES: Record<PipelinePhase, string> = {
   transcribe: 'Transcrevendo em paralelo',
   diarize: 'Identificando falantes em paralelo',
   extract_facts: 'Extraindo decisoes e acoes',
+  wait_speakers: 'Aguardando falantes',
   generate: 'Montando ata final',
   complete: 'Processamento concluido',
 };
@@ -42,12 +44,15 @@ const PHASE_PERCENT: Record<Exclude<PipelinePhase, 'transcribe'>, number> = {
   create_chunks: 16,
   diarize: 88,
   extract_facts: 92,
+  wait_speakers: 96,
   generate: 97,
   complete: 100,
 };
 
 const TRANSCRIBE_START_PERCENT = 18;
 const TRANSCRIBE_END_PERCENT = 82;
+const EXTRACT_FACTS_START_PERCENT = 89;
+const EXTRACT_FACTS_END_PERCENT = 95;
 const MIN_SPEED_ELAPSED_MS = 1000;
 
 function clamp(value: number, min: number, max: number) {
@@ -81,10 +86,16 @@ function formatDuration(totalSec: number) {
 
 function phasePercent(phase: PipelinePhase, ratio: number) {
   if (phase === 'complete') return 100;
-  if (phase !== 'transcribe') return PHASE_PERCENT[phase];
+  if (phase === 'transcribe') {
+    const span = TRANSCRIBE_END_PERCENT - TRANSCRIBE_START_PERCENT;
+    return clamp(Math.round(TRANSCRIBE_START_PERCENT + ratio * span), TRANSCRIBE_START_PERCENT, TRANSCRIBE_END_PERCENT);
+  }
+  if (phase === 'extract_facts') {
+    const span = EXTRACT_FACTS_END_PERCENT - EXTRACT_FACTS_START_PERCENT;
+    return clamp(Math.round(EXTRACT_FACTS_START_PERCENT + ratio * span), EXTRACT_FACTS_START_PERCENT, EXTRACT_FACTS_END_PERCENT);
+  }
 
-  const span = TRANSCRIBE_END_PERCENT - TRANSCRIBE_START_PERCENT;
-  return clamp(Math.round(TRANSCRIBE_START_PERCENT + ratio * span), TRANSCRIBE_START_PERCENT, TRANSCRIBE_END_PERCENT);
+  return PHASE_PERCENT[phase];
 }
 
 export function derivePipelineProgress(input: PipelineProgressInput): PipelineProgressView {
@@ -93,9 +104,11 @@ export function derivePipelineProgress(input: PipelineProgressInput): PipelinePr
   const safeCompletedAudioSec = finiteNonNegative(completedAudioSec);
   const ratio = totalAudioSec > 0 ? completedAudioSec / totalAudioSec : 0;
   const safeRatio = Number.isFinite(ratio) ? clamp(ratio, 0, 1) : 0;
-  const percent = phasePercent(input.phase, safeRatio);
   const totalChunks = finiteNonNegativeInteger(input.totalChunks);
   const completedChunks = clamp(finiteNonNegativeInteger(input.completedChunks), 0, totalChunks);
+  const chunkRatio = totalChunks > 0 ? completedChunks / totalChunks : 0;
+  const safeChunkRatio = Number.isFinite(chunkRatio) ? clamp(chunkRatio, 0, 1) : 0;
+  const percent = phasePercent(input.phase, input.phase === 'extract_facts' ? safeChunkRatio : safeRatio);
   const elapsedMs = finiteNonNegative(input.elapsedMs);
   const canEstimateSpeed = elapsedMs >= MIN_SPEED_ELAPSED_MS && safeCompletedAudioSec > 0;
   const speed = canEstimateSpeed ? safeCompletedAudioSec / (elapsedMs / 1000) : 0;
@@ -159,18 +172,29 @@ export function derivePipelineProgress(input: PipelineProgressInput): PipelinePr
       return {
         percent,
         title: 'Aguardando falantes',
-        detail: 'Fatos extraidos. Finalizando a identificacao de falantes antes de montar a ata.',
-        etaLabel: '',
-        speedLabel: '',
+        detail: `${completedChunks} de ${totalChunks} blocos de insights prontos. Falantes ainda em processamento antes da ata.`,
+        etaLabel: 'Insights completos',
+        speedLabel: `Tempo total ${formatDuration(elapsedMs / 1000)}`,
       };
     }
 
+    const insightPercent = totalChunks > 0 ? Math.round((completedChunks / totalChunks) * 100) : 0;
     return {
       percent,
       title: PHASE_TITLES[input.phase],
       detail: `Lendo ${completedChunks} de ${totalChunks} blocos para separar decisoes, tarefas, riscos e perguntas.`,
-      etaLabel: '',
-      speedLabel: '',
+      etaLabel: `${completedChunks} de ${totalChunks} blocos de insights`,
+      speedLabel: `${insightPercent}% dos insights`,
+    };
+  }
+
+  if (input.phase === 'wait_speakers') {
+    return {
+      percent,
+      title: PHASE_TITLES[input.phase],
+      detail: 'Insights prontos. Mantendo a ata em espera ate a identificacao de falantes terminar.',
+      etaLabel: 'Falantes em andamento',
+      speedLabel: `Tempo total ${formatDuration(elapsedMs / 1000)}`,
     };
   }
 
