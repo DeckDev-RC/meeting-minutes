@@ -34,6 +34,10 @@ import {
 import { transcribeChunksConcurrently } from "../lib/transcriptionQueue";
 import { transcribeChunksWithLocalBackend } from "../lib/localTranscription";
 import { scoreCloudflareTranscriptRisk } from "../lib/transcriptionQuality";
+import {
+  getCloudflareQuotaState,
+  markCloudflareQuotaExhausted,
+} from "../lib/cloudTranscriptionHealth";
 import { mergeSortedTranscriptionSegments } from "../lib/segmentMerge";
 import { resolveSegmentsForFactScheduling } from "../lib/processingChunks";
 import { buildAdaptiveFactBatches, type FactBatchItem } from "../lib/meetingFactsQueue";
@@ -736,6 +740,8 @@ export default function Processing() {
         return;
       }
       const processingProfile = normalizeProcessingProfile(meeting.processingProfile);
+      const meetingTranscriptionProfile =
+        meeting.transcriptionProfile ?? keys.transcriptionProfile ?? "smart-low-cost";
       const participantNames = parseParticipantsHint(meeting.participantsHint);
       const diarizationExpectedSpeakers = resolveDiarizationExpectedSpeakers(
         keys.expectedSpeakers,
@@ -1135,8 +1141,11 @@ export default function Processing() {
         cloudflareAccountId: keys.cloudflareAccountId,
         cloudflareApiToken: keys.cloudflareApiToken,
         deepgramApiKey: keys.deepgramApiKey,
-        profile: keys.transcriptionProfile,
+        profile: meetingTranscriptionProfile,
         manualProvider: keys.manualTranscriptionProvider,
+        unavailableBackends: getCloudflareQuotaState(window.localStorage).isExhaustedToday
+          ? ["cloudflare"]
+          : [],
       });
       addLiveLog(
         meetingId,
@@ -1145,7 +1154,7 @@ export default function Processing() {
       );
       const selectiveDeepgramCorrection =
         transcriptionBackend === "cloudflare" &&
-        (keys.transcriptionProfile ?? "smart-low-cost") === "smart-low-cost" &&
+        meetingTranscriptionProfile === "smart-low-cost" &&
         Boolean(keys.deepgramApiKey?.trim());
       const activeTranscriptionRouteNote = selectiveDeepgramCorrection
         ? "Transcricao: Cloudflare com correcao Deepgram seletiva."
@@ -1163,6 +1172,14 @@ export default function Processing() {
         );
       }
       const unavailableTranscriptionBackends = new Set<TranscriptionBackend>();
+      if (getCloudflareQuotaState(window.localStorage).isExhaustedToday) {
+        unavailableTranscriptionBackends.add("cloudflare");
+        addLiveLog(
+          meetingId,
+          "warning",
+          "Cloudflare ja estava marcado como sem cota hoje; iniciando direto no fallback.",
+        );
+      }
       const markTranscriptionBackendUnavailable = (
         backend: TranscriptionBackend,
         reason: string,
@@ -1172,13 +1189,16 @@ export default function Processing() {
         }
 
         unavailableTranscriptionBackends.add(backend);
+        if (backend === "cloudflare" && isQuotaOrRateLimitError(reason)) {
+          markCloudflareQuotaExhausted(window.localStorage, new Date(), reason);
+        }
         const fallbackBackends = selectFallbackTranscriptionBackends({
           totalAudioSec,
           groqApiKey: keys.groq,
           cloudflareAccountId: keys.cloudflareAccountId,
           cloudflareApiToken: keys.cloudflareApiToken,
           deepgramApiKey: keys.deepgramApiKey,
-          profile: keys.transcriptionProfile,
+          profile: meetingTranscriptionProfile,
           manualProvider: keys.manualTranscriptionProvider,
           primaryBackend: backend,
           unavailableBackends: Array.from(unavailableTranscriptionBackends),
@@ -1231,7 +1251,7 @@ export default function Processing() {
           cloudflareAccountId: keys.cloudflareAccountId,
           cloudflareApiToken: keys.cloudflareApiToken,
           deepgramApiKey: keys.deepgramApiKey,
-          profile: keys.transcriptionProfile,
+          profile: meetingTranscriptionProfile,
           manualProvider: keys.manualTranscriptionProvider,
           primaryBackend: backend,
           unavailableBackends: Array.from(unavailableTranscriptionBackends),
@@ -1280,6 +1300,20 @@ export default function Processing() {
         completedStoredChunks.length,
         storedChunks.length,
       );
+      if (completedStoredChunks.length > 0 && pendingChunks.length > 0) {
+        const nextChunk = Math.min(...pendingChunks.map((chunk) => chunk.index)) + 1;
+        addLiveLog(
+          meetingId,
+          "info",
+          `Retomando do chunk ${nextChunk}/${storedChunks.length} usando ${transcriptionBackendLabel(transcriptionBackend)}.`,
+        );
+      } else if (completedStoredChunks.length > 0) {
+        addLiveLog(
+          meetingId,
+          "info",
+          `Retomada detectada: ${completedStoredChunks.length}/${storedChunks.length} chunks ja estavam transcritos.`,
+        );
+      }
 
       let newSegments: TranscriptionSegment[] = [];
       if (isLocalTranscriptionBackend(transcriptionBackend)) {
@@ -1375,7 +1409,7 @@ export default function Processing() {
               let segmentBackend = transcriptionResult.backend;
               if (
                 segmentBackend === "cloudflare" &&
-                (keys.transcriptionProfile ?? "smart-low-cost") === "smart-low-cost" &&
+                meetingTranscriptionProfile === "smart-low-cost" &&
                 keys.deepgramApiKey?.trim() &&
                 chunk
               ) {

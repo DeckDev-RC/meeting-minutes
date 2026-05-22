@@ -135,6 +135,12 @@ export const transcribeChunksParakeetLocal = (
     model,
   });
 
+export const checkLocalTranscriptionBackends = () =>
+  invoke<{
+    fasterWhisperAvailable: boolean;
+    parakeetAvailable: boolean;
+  }>('check_local_transcription_backends');
+
 export const diarizeTranscription = (segmentsJson: string, geminiApiKey: string) =>
   invoke<DiarizedResult>('diarize_transcription', { segmentsJson, geminiApiKey });
 

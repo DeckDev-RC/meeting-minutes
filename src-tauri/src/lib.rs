@@ -147,6 +147,7 @@ pub fn run() {
             commands::transcribe::transcribe_chunk_local,
             commands::transcribe::parakeet::transcribe_chunks_parakeet_local,
             commands::transcribe::transcribe_chunks_local,
+            commands::transcribe::check_local_transcription_backends,
             commands::diarize::align_speaker_turns_to_transcription,
             commands::diarize::diarize_audio_turns_modern_cpu,
             commands::diarize::diarize_audio_turns_modern_cpu_chunked,

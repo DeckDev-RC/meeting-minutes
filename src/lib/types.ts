@@ -23,6 +23,7 @@ export interface Meeting {
   audioPath: string | null;
   participantsHint: string | null;
   processingProfile: ProcessingProfile;
+  transcriptionProfile?: TranscriptionRoutingProfile | null;
   status: MeetingStatus;
   createdAt: string;
   updatedAt: string;
@@ -37,6 +38,7 @@ export interface MeetingMetadata {
   fileModifiedAt?: string | null;
   recordedAt?: string | null;
   recordedAtSource?: string | null;
+  durationSec?: number | null;
 }
 
 export interface TranscriptionSegment {

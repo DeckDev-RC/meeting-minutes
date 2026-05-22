@@ -129,6 +129,7 @@ fn migrate_meetings_metadata(conn: &Connection) -> Result<(), rusqlite::Error> {
         "processing_profile",
         "processing_profile TEXT NOT NULL DEFAULT 'balanced'",
     )?;
+    add_meeting_column_if_missing(conn, "transcription_profile", "transcription_profile TEXT")?;
     Ok(())
 }
 
@@ -137,6 +138,17 @@ fn normalize_processing_profile(value: Option<&str>) -> &str {
         Some("turbo") => "turbo",
         Some("precision") => "precision",
         _ => "balanced",
+    }
+}
+
+fn normalize_transcription_profile(value: Option<&str>) -> Option<&str> {
+    match value {
+        Some("smart-low-cost") => Some("smart-low-cost"),
+        Some("max-quality") => Some("max-quality"),
+        Some("groq-turbo") => Some("groq-turbo"),
+        Some("offline-free") => Some("offline-free"),
+        Some("manual") => Some("manual"),
+        _ => None,
     }
 }
 
@@ -222,17 +234,20 @@ pub fn save_meeting(
         .map(str::trim)
         .filter(|value| !value.is_empty());
     let processing_profile = normalize_processing_profile(meeting["processingProfile"].as_str());
+    let transcription_profile =
+        normalize_transcription_profile(meeting["transcriptionProfile"].as_str());
 
     db.execute(
         "INSERT INTO meetings
-            (id, title, file_path, participants_hint, processing_profile, status, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            (id, title, file_path, participants_hint, processing_profile, transcription_profile, status, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             id,
             title,
             file_path,
             participants_hint,
             processing_profile,
+            transcription_profile,
             status,
             now,
             now
@@ -246,7 +261,7 @@ pub fn save_meeting(
 pub fn get_meetings(state: tauri::State<'_, DbState>) -> Result<Vec<Meeting>, String> {
     let db = state.0.lock().map_err(|e| e.to_string())?;
     let mut stmt = db.prepare(
-        "SELECT id, title, file_path, audio_path, participants_hint, processing_profile, status, created_at, updated_at
+        "SELECT id, title, file_path, audio_path, participants_hint, processing_profile, transcription_profile, status, created_at, updated_at
          FROM meetings
          ORDER BY created_at DESC"
     ).map_err(|e| e.to_string())?;
@@ -260,9 +275,10 @@ pub fn get_meetings(state: tauri::State<'_, DbState>) -> Result<Vec<Meeting>, St
                 audio_path: row.get(3)?,
                 participants_hint: row.get(4)?,
                 processing_profile: row.get(5)?,
-                status: row.get(6)?,
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
+                transcription_profile: row.get(6)?,
+                status: row.get(7)?,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -655,6 +671,7 @@ mod tests {
 
         assert!(columns.contains("participants_hint"));
         assert!(columns.contains("processing_profile"));
+        assert!(columns.contains("transcription_profile"));
 
         std::fs::remove_dir_all(dir).ok();
     }
@@ -683,6 +700,7 @@ mod tests {
 
         assert!(columns.contains("participants_hint"));
         assert!(columns.contains("processing_profile"));
+        assert!(columns.contains("transcription_profile"));
 
         std::fs::remove_dir_all(dir).ok();
     }

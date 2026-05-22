@@ -636,6 +636,7 @@ fn ffmpeg_metadata_value(line: &str) -> Option<(&str, &str)> {
 
 pub fn parse_ffmpeg_media_metadata(stderr: &str) -> MeetingMetadata {
     let mut metadata = MeetingMetadata::default();
+    metadata.duration_sec = parse_duration_from_ffmpeg_stderr(stderr);
 
     for line in stderr.lines() {
         let Some((key, value)) = ffmpeg_metadata_value(line) else {
@@ -716,6 +717,9 @@ pub async fn probe_media_metadata(
             }
             if parsed.source_title.is_some() {
                 metadata.source_title = parsed.source_title;
+            }
+            if parsed.duration_sec.is_some() {
+                metadata.duration_sec = parsed.duration_sec;
             }
         }
     }
@@ -1538,6 +1542,7 @@ Input #0, wav, from 'meeting.wav':
     fn parses_video_creation_time_from_ffmpeg_metadata() {
         let stderr = r#"
 Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'reuniao.mp4':
+  Duration: 03:00:12.50, start: 0.000000, bitrate: 825 kb/s
   Metadata:
     major_brand     : isom
     creation_time   : 2026-05-08T18:48:29.000000Z
@@ -1554,6 +1559,7 @@ Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'reuniao.mp4':
             metadata.source_title.as_deref(),
             Some("Reuniao de alinhamento")
         );
+        assert_eq!(metadata.duration_sec, Some(10812.5));
     }
 
     #[test]

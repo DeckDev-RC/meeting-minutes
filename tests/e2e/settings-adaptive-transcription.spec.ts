@@ -26,6 +26,13 @@ async function installSettingsMock(page: Page) {
           return undefined;
         }
 
+        if (command === "check_local_transcription_backends") {
+          return {
+            fasterWhisperAvailable: true,
+            parakeetAvailable: false,
+          };
+        }
+
         throw new Error(`Unhandled mock command: ${command}`);
       },
     };
@@ -56,8 +63,9 @@ test("settings saves adaptive transcription providers and profile", async ({ pag
     timeout: 20_000,
   });
   await expect(page.getByText("Transcricao adaptativa")).toBeVisible();
+  await expect(page.getByText("Diagnostico de provedores")).toBeVisible();
 
-  await page.getByLabel("Perfil de transcricao").selectOption("smart-low-cost");
+  await page.getByLabel("Orcamento padrao de transcricao").selectOption("smart-low-cost");
   await page.getByLabel("Chave API Groq").fill("gsk_live");
   await page.getByLabel("Cloudflare Account ID").fill("cf-account");
   await page.getByLabel("Cloudflare API Token").fill("cfat_token");

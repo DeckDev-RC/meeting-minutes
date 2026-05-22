@@ -99,6 +99,7 @@ async function installTauriMock(page: Page) {
               audioPath: null,
               participantsHint: "Caio\nEmanuella",
               processingProfile: "balanced",
+              transcriptionProfile: "smart-low-cost",
               status: "processing",
               createdAt: "2026-05-20T12:00:00Z",
               updatedAt: "2026-05-20T12:00:00Z",

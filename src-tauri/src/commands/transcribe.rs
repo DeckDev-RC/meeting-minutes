@@ -57,6 +57,13 @@ pub struct LocalTranscriptionChunkResult {
     pub segments: Vec<TranscriptionSegment>,
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalTranscriptionBackendStatus {
+    pub faster_whisper_available: bool,
+    pub parakeet_available: bool,
+}
+
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FasterWhisperChunkOutput {
@@ -698,6 +705,14 @@ fn available_cpu_threads_for_transcription() -> usize {
         .map(|value| value.get())
         .unwrap_or(4)
         .clamp(2, 8)
+}
+
+#[command]
+pub fn check_local_transcription_backends() -> LocalTranscriptionBackendStatus {
+    LocalTranscriptionBackendStatus {
+        faster_whisper_available: resolve_faster_whisper_backend().is_ok(),
+        parakeet_available: parakeet::parakeet_backend_available(),
+    }
 }
 
 pub async fn transcribe_chunks_with_faster_whisper(

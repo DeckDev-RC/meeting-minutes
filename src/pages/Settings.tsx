@@ -1,5 +1,10 @@
 import { useEffect, useState } from "react";
-import { getApiKeys, setApiKeys } from "../lib/tauri";
+import { checkLocalTranscriptionBackends, getApiKeys, setApiKeys } from "../lib/tauri";
+import {
+  clearCloudflareQuotaExhausted,
+  getCloudflareQuotaState,
+  type CloudflareQuotaState,
+} from "../lib/cloudTranscriptionHealth";
 import type { TranscriptionBackend } from "../lib/transcriptionProvider";
 import type { TranscriptionRoutingProfile } from "../lib/types";
 
@@ -14,6 +19,14 @@ export default function Settings() {
   const [manualTranscriptionProvider, setManualTranscriptionProvider] =
     useState<TranscriptionBackend>("groq");
   const [expectedSpeakers, setExpectedSpeakers] = useState("");
+  const [localStatus, setLocalStatus] = useState<{
+    fasterWhisperAvailable: boolean;
+    parakeetAvailable: boolean;
+  } | null>(null);
+  const [cloudflareQuotaState, setCloudflareQuotaState] =
+    useState<CloudflareQuotaState>(() =>
+      getCloudflareQuotaState(typeof window === "undefined" ? undefined : window.localStorage),
+    );
   const [saved, setSaved] = useState(false);
   const [loading, setLoading] = useState(true);
 
@@ -35,9 +48,34 @@ export default function Settings() {
     } catch {
       // First run, no keys yet
     } finally {
+      setCloudflareQuotaState(
+        getCloudflareQuotaState(typeof window === "undefined" ? undefined : window.localStorage),
+      );
+      checkLocalTranscriptionBackends()
+        .then(setLocalStatus)
+        .catch(() =>
+          setLocalStatus({
+            fasterWhisperAvailable: false,
+            parakeetAvailable: false,
+          }),
+        );
       setLoading(false);
     }
   };
+
+  const clearCloudflareStatus = () => {
+    clearCloudflareQuotaExhausted(typeof window === "undefined" ? undefined : window.localStorage);
+    setCloudflareQuotaState(
+      getCloudflareQuotaState(typeof window === "undefined" ? undefined : window.localStorage),
+    );
+  };
+
+  const cloudflareConfigured = Boolean(cloudflareAccountId.trim() && cloudflareApiToken.trim());
+  const deepgramConfigured = Boolean(deepgramApiKey.trim());
+  const groqConfigured = Boolean(groq.trim());
+  const localConfigured = Boolean(
+    localStatus?.fasterWhisperAvailable || localStatus?.parakeetAvailable,
+  );
 
   const handleSave = async () => {
     const speakerCount = expectedSpeakers ? Number(expectedSpeakers) : undefined;
@@ -84,10 +122,87 @@ export default function Settings() {
           </p>
         </div>
 
+        <section className="mb-5 rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <p className="text-sm font-semibold text-gray-950">Diagnostico de provedores</p>
+              <p className="mt-1 text-xs leading-5 text-gray-500">
+                O processamento usa esse estado para escolher fallback antes de iniciar.
+              </p>
+            </div>
+            {cloudflareQuotaState.isExhaustedToday && (
+              <button
+                type="button"
+                onClick={clearCloudflareStatus}
+                className="rounded-lg border border-amber-200 bg-white px-3 py-2 text-xs font-semibold text-amber-700 hover:bg-amber-50"
+              >
+                Reativar Cloudflare
+              </button>
+            )}
+          </div>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            {[
+              {
+                name: "Cloudflare",
+                status: cloudflareConfigured
+                  ? cloudflareQuotaState.isExhaustedToday
+                    ? "Cota provavelmente esgotada hoje"
+                    : "Configurado"
+                  : "Nao configurado",
+                tone:
+                  cloudflareConfigured && !cloudflareQuotaState.isExhaustedToday
+                    ? "good"
+                    : cloudflareConfigured
+                      ? "warn"
+                      : "muted",
+              },
+              {
+                name: "Deepgram",
+                status: deepgramConfigured ? "Configurado para fallback/premium" : "Nao configurado",
+                tone: deepgramConfigured ? "good" : "muted",
+              },
+              {
+                name: "Groq",
+                status: groqConfigured ? "Configurado como opcional" : "Nao configurado",
+                tone: groqConfigured ? "good" : "muted",
+              },
+              {
+                name: "Local",
+                status: localConfigured
+                  ? `Disponivel (${[
+                      localStatus?.fasterWhisperAvailable ? "faster-whisper" : "",
+                      localStatus?.parakeetAvailable ? "Parakeet" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(", ")})`
+                  : "Ambiente local nao encontrado",
+                tone: localConfigured ? "good" : "warn",
+              },
+            ].map((item) => (
+              <div key={item.name} className="rounded-lg border border-gray-200 bg-white px-3 py-2">
+                <p className="text-xs font-medium uppercase tracking-wide text-gray-500">
+                  {item.name}
+                </p>
+                <p
+                  className={`mt-1 text-sm font-semibold ${
+                    item.tone === "good"
+                      ? "text-emerald-700"
+                      : item.tone === "warn"
+                        ? "text-amber-700"
+                        : "text-gray-500"
+                  }`}
+                >
+                  {item.status}
+                </p>
+              </div>
+            ))}
+          </div>
+        </section>
+
         <div className="space-y-5">
         <div>
           <label htmlFor="transcription-profile" className="mb-1.5 block text-sm font-semibold text-gray-800">
-            Perfil de transcricao
+            Orcamento padrao de transcricao
           </label>
           <select
             id="transcription-profile"
@@ -95,10 +210,10 @@ export default function Settings() {
             onChange={(e) => setTranscriptionProfile(e.target.value as TranscriptionRoutingProfile)}
             className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm shadow-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
           >
-            <option value="smart-low-cost">Economico inteligente</option>
-            <option value="max-quality">Qualidade maxima</option>
+            <option value="smart-low-cost">Baixo custo: Cloudflare + fallback</option>
+            <option value="max-quality">Qualidade maxima: Deepgram direto</option>
+            <option value="offline-free">R$ 0: offline/local</option>
             <option value="groq-turbo">Groq turbo</option>
-            <option value="offline-free">Offline gratis</option>
             <option value="manual">Manual</option>
           </select>
         </div>

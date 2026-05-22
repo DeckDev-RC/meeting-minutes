@@ -18,6 +18,7 @@ export interface TranscriptionBackendSelectionInput {
   deepgramApiKey?: string | null;
   profile?: TranscriptionRoutingProfile | null;
   manualProvider?: TranscriptionBackend | null;
+  unavailableBackends?: TranscriptionBackend[];
 }
 
 function hasValue(value?: string | null) {
@@ -50,7 +51,8 @@ function firstConfigured(
   input: TranscriptionBackendSelectionInput,
   candidates: TranscriptionBackend[],
 ) {
-  return candidates.find((backend) => isBackendConfigured(backend, input));
+  const unavailable = new Set(input.unavailableBackends ?? []);
+  return candidates.find((backend) => !unavailable.has(backend) && isBackendConfigured(backend, input));
 }
 
 export function isQuotaOrRateLimitError(message: string) {
@@ -100,6 +102,7 @@ export function selectTranscriptionBackend({
   deepgramApiKey,
   profile,
   manualProvider,
+  unavailableBackends,
 }: TranscriptionBackendSelectionInput): TranscriptionBackend {
   const input = {
     totalAudioSec,
@@ -109,12 +112,16 @@ export function selectTranscriptionBackend({
     deepgramApiKey,
     profile,
     manualProvider,
+    unavailableBackends,
   };
   const fallback = localFallbackForDuration(totalAudioSec);
   const activeProfile = profile || DEFAULT_TRANSCRIPTION_PROFILE;
+  const unavailable = new Set(unavailableBackends ?? []);
 
   if (activeProfile === "manual" && manualProvider) {
-    return isBackendConfigured(manualProvider, input) ? manualProvider : fallback;
+    return !unavailable.has(manualProvider) && isBackendConfigured(manualProvider, input)
+      ? manualProvider
+      : fallback;
   }
 
   if (activeProfile === "offline-free") {
@@ -140,7 +147,7 @@ export function selectTranscriptionBackend({
     return "parakeet-local";
   }
 
-  return firstConfigured(input, ["cloudflare", "groq", "deepgram"]) ?? fallback;
+  return firstConfigured(input, ["cloudflare", "deepgram", "groq"]) ?? fallback;
 }
 
 export function transcriptionBackendLabel(backend: TranscriptionBackend) {

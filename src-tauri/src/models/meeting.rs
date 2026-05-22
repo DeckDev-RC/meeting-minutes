@@ -12,6 +12,8 @@ pub struct Meeting {
     pub participants_hint: Option<String>,
     #[serde(rename = "processingProfile")]
     pub processing_profile: String,
+    #[serde(rename = "transcriptionProfile")]
+    pub transcription_profile: Option<String>,
     pub status: String,
     #[serde(rename = "createdAt")]
     pub created_at: String,
@@ -38,4 +40,6 @@ pub struct MeetingMetadata {
     pub recorded_at: Option<String>,
     #[serde(default)]
     pub recorded_at_source: Option<String>,
+    #[serde(default)]
+    pub duration_sec: Option<f64>,
 }

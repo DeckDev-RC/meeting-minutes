@@ -16,3 +16,7 @@ __pycache__/
 *.pyc
 *.log
 .DS_Store
+
+# Build artifacts are published through releases/LFS, not normal Git history.
+executaveis/*.exe
+executaveis/*.msi

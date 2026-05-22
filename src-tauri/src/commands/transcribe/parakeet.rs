@@ -82,6 +82,10 @@ fn resolve_parakeet_backend() -> Result<ParakeetBackendPaths, String> {
     )
 }
 
+pub fn parakeet_backend_available() -> bool {
+    resolve_parakeet_backend().is_ok()
+}
+
 pub async fn transcribe_chunks_with_parakeet(
     audio_chunks: Vec<ExportedChunk>,
     model: Option<String>,

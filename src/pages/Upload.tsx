@@ -1,7 +1,17 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import DropZone from "../components/DropZone";
-import { saveMeeting } from "../lib/tauri";
+import { getApiKeys, probeMediaMetadata, saveMeeting } from "../lib/tauri";
+import {
+  getCloudflareQuotaState,
+  type CloudflareQuotaState,
+} from "../lib/cloudTranscriptionHealth";
+import {
+  buildTranscriptionPreflight,
+  mapBudgetToTranscriptionProfile,
+  type TranscriptionBudgetProfile,
+  type TranscriptionPreflight,
+} from "../lib/transcriptionPreflight";
 import type { ProcessingProfile } from "../lib/types";
 import { useMeetingStore } from "../store/meetingStore";
 
@@ -27,13 +37,119 @@ const PROFILE_OPTIONS: {
   },
 ];
 
+const BUDGET_OPTIONS: {
+  value: TranscriptionBudgetProfile;
+  label: string;
+  detail: string;
+}[] = [
+  {
+    value: "low-cost",
+    label: "Baixo custo",
+    detail: "Cloudflare primeiro; Deepgram entra se houver cota/qualidade em risco.",
+  },
+  {
+    value: "free-local",
+    label: "R$ 0 offline",
+    detail: "Usa backend local e evita API de transcricao.",
+  },
+  {
+    value: "max-quality",
+    label: "Qualidade maxima",
+    detail: "Deepgram direto para nomes e termos mais estaveis.",
+  },
+];
+
+const formatDuration = (durationSec: number) => {
+  if (!Number.isFinite(durationSec) || durationSec <= 0) return "Nao detectada";
+  const totalMinutes = Math.round(durationSec / 60);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours <= 0) return `${minutes} min`;
+  return `${hours}h ${String(minutes).padStart(2, "0")}min`;
+};
+
+const formatUsd = (amount: number) => `US$ ${amount.toFixed(2)}`;
+
 export default function Upload() {
   const navigate = useNavigate();
   const [filePath, setFilePath] = useState<string | null>(null);
   const [processingProfile, setProcessingProfile] = useState<ProcessingProfile>("balanced");
+  const [budgetProfile, setBudgetProfile] = useState<TranscriptionBudgetProfile>("low-cost");
   const [participantsHint, setParticipantsHint] = useState("");
   const [loading, setLoading] = useState(false);
+  const [durationSec, setDurationSec] = useState<number | null>(null);
+  const [preflightLoading, setPreflightLoading] = useState(false);
+  const [preflightError, setPreflightError] = useState("");
+  const [apiKeys, setApiKeysState] = useState<Awaited<ReturnType<typeof getApiKeys>> | null>(null);
+  const [cloudflareQuotaState, setCloudflareQuotaState] =
+    useState<CloudflareQuotaState>(() =>
+      getCloudflareQuotaState(typeof window === "undefined" ? undefined : window.localStorage),
+    );
   const { setCurrentMeeting, reset } = useMeetingStore();
+
+  useEffect(() => {
+    let cancelled = false;
+    setCloudflareQuotaState(
+      getCloudflareQuotaState(typeof window === "undefined" ? undefined : window.localStorage),
+    );
+    getApiKeys()
+      .then((keys) => {
+        if (cancelled) return;
+        setApiKeysState(keys);
+        if (keys.transcriptionProfile === "offline-free") setBudgetProfile("free-local");
+        if (keys.transcriptionProfile === "max-quality") setBudgetProfile("max-quality");
+      })
+      .catch(() => {
+        if (!cancelled) setApiKeysState(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!filePath) {
+      setDurationSec(null);
+      setPreflightError("");
+      return;
+    }
+
+    let cancelled = false;
+    setPreflightLoading(true);
+    setPreflightError("");
+    probeMediaMetadata(filePath)
+      .then((metadata) => {
+        if (cancelled) return;
+        setDurationSec(metadata.durationSec ?? null);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error(err);
+        setDurationSec(null);
+        setPreflightError("Nao foi possivel detectar a duracao antes de iniciar.");
+      })
+      .finally(() => {
+        if (!cancelled) setPreflightLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [filePath]);
+
+  const preflight: TranscriptionPreflight | null = useMemo(() => {
+    if (!apiKeys || !durationSec) return null;
+    return buildTranscriptionPreflight({
+      durationSec,
+      budgetProfile,
+      groqApiKey: apiKeys.groq,
+      cloudflareAccountId: apiKeys.cloudflareAccountId,
+      cloudflareApiToken: apiKeys.cloudflareApiToken,
+      deepgramApiKey: apiKeys.deepgramApiKey,
+      manualProvider: apiKeys.manualTranscriptionProvider,
+      cloudflareQuotaExhaustedToday: cloudflareQuotaState.isExhaustedToday,
+    });
+  }, [apiKeys, budgetProfile, cloudflareQuotaState.isExhaustedToday, durationSec]);
 
   const handleProcess = async () => {
     if (!filePath) return;
@@ -44,6 +160,8 @@ export default function Upload() {
         filePath,
         participantsHint: participantsHint.trim() || null,
         processingProfile,
+        transcriptionProfile:
+          preflight?.transcriptionProfile ?? mapBudgetToTranscriptionProfile(budgetProfile),
         status: "processing",
       });
       setCurrentMeeting(id);
@@ -100,6 +218,36 @@ export default function Upload() {
             </div>
 
             <div>
+              <label className="mb-2 block text-sm font-semibold text-gray-900">
+                Orcamento da transcricao
+              </label>
+              <div className="grid gap-2 sm:grid-cols-3" role="radiogroup">
+                {BUDGET_OPTIONS.map((option) => {
+                  const selected = budgetProfile === option.value;
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => setBudgetProfile(option.value)}
+                      className={`rounded-lg border px-3 py-3 text-left transition-colors ${
+                        selected
+                          ? "border-blue-500 bg-blue-50 text-blue-900 ring-2 ring-blue-100"
+                          : "border-gray-200 bg-white text-gray-700 hover:border-blue-200 hover:bg-blue-50/40"
+                      }`}
+                      role="radio"
+                      aria-checked={selected}
+                    >
+                      <span className="block text-sm font-semibold">{option.label}</span>
+                      <span className="mt-1 block text-xs leading-5 text-gray-500">
+                        {option.detail}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div>
               <label className="mb-1.5 block text-sm font-semibold text-gray-900">
                 Participantes conhecidos
               </label>
@@ -117,15 +265,83 @@ export default function Upload() {
           </div>
 
           {filePath && (
-            <div className="mt-6 flex flex-col gap-3 border-t border-gray-100 pt-5 sm:flex-row sm:items-center sm:justify-between">
-              <p className="text-sm text-gray-500">Tudo certo para iniciar o processamento.</p>
-              <button
-                onClick={handleProcess}
-                disabled={loading}
-                className="rounded-lg bg-blue-600 px-6 py-3 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {loading ? "Iniciando..." : "Processar reuniao"}
-              </button>
+            <div className="mt-6 space-y-4 border-t border-gray-100 pt-5">
+              <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <p className="text-sm font-semibold text-gray-900">Pre-check da reuniao</p>
+                    <p className="mt-1 text-xs leading-5 text-gray-500">
+                      {preflightLoading
+                        ? "Detectando duracao e rota de transcricao..."
+                        : preflightError || "Revise custo, cota e fallback antes de iniciar."}
+                    </p>
+                  </div>
+                  <span
+                    className={`w-fit rounded-full px-2.5 py-1 text-xs font-semibold ${
+                      preflight?.quotaRisk.level === "high" ||
+                      preflight?.quotaRisk.level === "blocked"
+                        ? "bg-amber-100 text-amber-800"
+                        : "bg-emerald-100 text-emerald-700"
+                    }`}
+                  >
+                    {preflight?.quotaRisk.label ?? "Calculando"}
+                  </span>
+                </div>
+                <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-5">
+                  <div>
+                    <dt className="text-xs font-medium uppercase tracking-wide text-gray-500">
+                      Duracao
+                    </dt>
+                    <dd className="mt-1 font-semibold text-gray-900">
+                      {durationSec ? formatDuration(durationSec) : "Calculando"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs font-medium uppercase tracking-wide text-gray-500">
+                      Backend
+                    </dt>
+                    <dd className="mt-1 font-semibold text-gray-900">
+                      {preflight?.backendLabel ?? "Calculando"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs font-medium uppercase tracking-wide text-gray-500">
+                      Fallback
+                    </dt>
+                    <dd className="mt-1 font-semibold text-gray-900">
+                      {preflight?.fallbackLabel ?? "Calculando"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs font-medium uppercase tracking-wide text-gray-500">
+                      Cota
+                    </dt>
+                    <dd className="mt-1 font-semibold text-gray-900">
+                      {preflight?.quotaRisk.detail ?? "Aguardando duracao"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs font-medium uppercase tracking-wide text-gray-500">
+                      Deepgram
+                    </dt>
+                    <dd className="mt-1 font-semibold text-gray-900">
+                      {preflight
+                        ? `${formatUsd(preflight.deepgramFallbackCost.amount)} se usado`
+                        : "Calculando"}
+                    </dd>
+                  </div>
+                </dl>
+              </div>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-sm text-gray-500">Tudo certo para iniciar o processamento.</p>
+                <button
+                  onClick={handleProcess}
+                  disabled={loading || preflightLoading}
+                  className="rounded-lg bg-blue-600 px-6 py-3 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {loading ? "Iniciando..." : "Processar reuniao"}
+                </button>
+              </div>
             </div>
           )}
         </section>
