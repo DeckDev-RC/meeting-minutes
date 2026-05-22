@@ -1,8 +1,10 @@
 import json
 import argparse
+import concurrent.futures
 import importlib.metadata
 import os
 import tempfile
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -371,6 +373,39 @@ def chunk_value(chunk, *names, default=None):
     return default
 
 
+def normalize_max_workers(max_workers, chunk_count):
+    if chunk_count <= 0:
+        return 1
+    if max_workers is None:
+        return 1
+    try:
+        parsed = int(max_workers)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, min(parsed, chunk_count))
+
+
+def build_batch_chunk_output(diarize_fn, chunk, fallback_index, kwargs):
+    audio_path = chunk_value(chunk, "audioPath", "audio_path")
+    if not audio_path:
+        raise RuntimeError(f"Chunk {fallback_index} is missing audioPath")
+    index = int(chunk_value(chunk, "index", default=fallback_index))
+    payload = build_payload_with_diarize(diarize_fn, audio_path, kwargs)
+    chunk_output = {
+        "index": index,
+        "audioPath": audio_path,
+        "offsetSec": float(chunk_value(chunk, "offsetSec", "offset_sec", default=0.0) or 0.0),
+        "diarized": {
+            "speakers": payload["speakers"],
+            "segments": payload["segments"],
+        },
+        "report": payload,
+    }
+    if payload.get("speakerCentroids"):
+        chunk_output["speakerCentroids"] = payload["speakerCentroids"]
+    return chunk_output
+
+
 def run_backend_batch_with_diarize(
     diarize_fn,
     chunks,
@@ -378,30 +413,43 @@ def run_backend_batch_with_diarize(
     num_speakers=None,
     min_speakers=None,
     max_speakers=None,
+    max_workers=1,
+    diarize_factory=None,
 ):
     kwargs = backend_kwargs(num_speakers, min_speakers, max_speakers)
+    safe_workers = normalize_max_workers(max_workers, len(chunks))
     started = time.perf_counter()
-    chunk_outputs = []
 
-    for fallback_index, chunk in enumerate(chunks):
-        audio_path = chunk_value(chunk, "audioPath", "audio_path")
-        if not audio_path:
-            raise RuntimeError(f"Chunk {fallback_index} is missing audioPath")
-        index = int(chunk_value(chunk, "index", default=fallback_index))
-        payload = build_payload_with_diarize(diarize_fn, audio_path, kwargs)
-        chunk_output = {
-            "index": index,
-            "audioPath": audio_path,
-            "offsetSec": float(chunk_value(chunk, "offsetSec", "offset_sec", default=0.0) or 0.0),
-            "diarized": {
-                "speakers": payload["speakers"],
-                "segments": payload["segments"],
-            },
-            "report": payload,
-        }
-        if payload.get("speakerCentroids"):
-            chunk_output["speakerCentroids"] = payload["speakerCentroids"]
-        chunk_outputs.append(chunk_output)
+    if safe_workers <= 1:
+        if diarize_fn is None:
+            diarize_fn = diarize_factory() if diarize_factory is not None else load_diarize_function()
+        chunk_outputs = [
+            build_batch_chunk_output(diarize_fn, chunk, fallback_index, kwargs)
+            for fallback_index, chunk in enumerate(chunks)
+        ]
+    else:
+        worker_state = threading.local()
+
+        def worker_diarize_fn():
+            if diarize_factory is None:
+                return diarize_fn
+            if not hasattr(worker_state, "diarize_fn"):
+                worker_state.diarize_fn = diarize_factory()
+            return worker_state.diarize_fn
+
+        def process_chunk(item):
+            fallback_index, chunk = item
+            local_diarize_fn = worker_diarize_fn()
+            if local_diarize_fn is None:
+                raise RuntimeError("Parallel batch mode requires a diarize function or factory")
+            return build_batch_chunk_output(local_diarize_fn, chunk, fallback_index, kwargs)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=safe_workers) as executor:
+            futures = [
+                executor.submit(process_chunk, item)
+                for item in enumerate(chunks)
+            ]
+            chunk_outputs = [future.result() for future in futures]
 
     wall_clock_sec = time.perf_counter() - started
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -420,6 +468,7 @@ def run_backend_batch_with_diarize(
         "backend": "diarize",
         "model": "diarize-0.1.2",
         "chunkCount": len(chunk_outputs),
+        "maxWorkers": safe_workers,
         "audioDurationSec": audio_duration_sec,
         "wallClockSec": wall_clock_sec,
         "speakerCount": len(speakers) or 1,
@@ -439,10 +488,18 @@ def run_backend_batch_with_diarize(
     return report
 
 
-def run_backend_batch(chunks_path, output_dir, num_speakers=None, min_speakers=None, max_speakers=None):
+def run_backend_batch(
+    chunks_path,
+    output_dir,
+    num_speakers=None,
+    min_speakers=None,
+    max_speakers=None,
+    max_workers=1,
+):
     chunks = json.loads(Path(chunks_path).read_text(encoding="utf-8"))
     if not isinstance(chunks, list):
         raise RuntimeError("--chunks-json must contain a JSON array")
+    safe_workers = normalize_max_workers(max_workers, len(chunks))
     return run_backend_batch_with_diarize(
         load_diarize_function(),
         chunks,
@@ -450,6 +507,7 @@ def run_backend_batch(chunks_path, output_dir, num_speakers=None, min_speakers=N
         num_speakers=num_speakers,
         min_speakers=min_speakers,
         max_speakers=max_speakers,
+        max_workers=safe_workers,
     )
 
 
@@ -461,6 +519,7 @@ def parse_args():
     parser.add_argument("--num-speakers", type=int)
     parser.add_argument("--min-speakers", type=int)
     parser.add_argument("--max-speakers", type=int)
+    parser.add_argument("--max-workers", type=int, default=1, help="Maximum parallel chunks in batch mode")
     parser.add_argument("--json", action="store_true", help="Print the full JSON report.")
     return parser.parse_args()
 
@@ -470,6 +529,7 @@ def compact_report(report):
         "backend": report["backend"],
         "model": report["model"],
         "wallClockSec": report["wallClockSec"],
+        "maxWorkers": report.get("maxWorkers"),
         "realtimeFactor": report.get("realtimeFactor"),
         "speedX": report.get("speedX"),
         "speakerCount": report.get("speakerCount"),
@@ -504,6 +564,7 @@ if __name__ == "__main__":
             num_speakers=args.num_speakers,
             min_speakers=args.min_speakers,
             max_speakers=args.max_speakers,
+            max_workers=args.max_workers,
         )
     else:
         if not args.audio:

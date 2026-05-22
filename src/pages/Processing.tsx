@@ -83,6 +83,7 @@ const LIVE_STATE_PUBLISH_INTERVAL_MS = 160;
 const COMPLETED_SNAPSHOT_TTL_MS = 10 * 60 * 1000;
 const COMPLETED_SNAPSHOT_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 const MAX_LIVE_PROCESSING_SNAPSHOTS = 5;
+const MAX_CHUNKED_DIARIZATION_WORKERS = 3;
 
 type MinutesStreamPayload = {
   meetingId: string;
@@ -327,7 +328,8 @@ const startSpeculativeSpeakerTurns = (
   preferPyannote = false,
 ): Promise<SpeculativeSpeakerTurns> => {
   if (preferChunked && expectedSpeakers && audioChunks.length > 1) {
-    return diarizeAudioTurnsModernCpuChunked(audioChunks, expectedSpeakers, 2)
+    const workerCount = Math.min(MAX_CHUNKED_DIARIZATION_WORKERS, audioChunks.length);
+    return diarizeAudioTurnsModernCpuChunked(audioChunks, expectedSpeakers, workerCount)
       .then((turns) => ({ turns, error: "", engine: "modern-cpu-chunked" as const }))
       .catch((chunkedErr) =>
         diarizeAudioTurnsModernCpu(audioPath, expectedSpeakers)

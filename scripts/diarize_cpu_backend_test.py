@@ -1,5 +1,6 @@
 import json
 import tempfile
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -57,6 +58,7 @@ def test_run_backend_batch_reuses_loaded_diarize_function():
     assert [call[0] for call in calls] == ["a.wav", "b.wav"]
     assert all(call[1] == {"num_speakers": 2} for call in calls)
     assert report["chunkCount"] == 2
+    assert report["maxWorkers"] == 1
     assert report["audioDurationSec"] == 20.0
     assert report["speakerCount"] == 2
     assert report["segmentCount"] == 2
@@ -66,11 +68,96 @@ def test_run_backend_batch_reuses_loaded_diarize_function():
     assert saved[1]["diarized"]["segments"][0]["speaker"] == "Falante 2"
 
 
+def test_run_backend_batch_parallelizes_with_worker_factory():
+    calls = []
+    factory_calls = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(2)
+
+    def make_fake_diarize():
+        with lock:
+            engine_id = len(factory_calls)
+            factory_calls.append(engine_id)
+
+        def fake_diarize(audio_path, **kwargs):
+            if audio_path in {"a.wav", "b.wav"}:
+                barrier.wait(timeout=2)
+            with lock:
+                calls.append((engine_id, audio_path, kwargs))
+            return SimpleNamespace(
+                audio_duration=10.0,
+                segments=[SimpleNamespace(start=0.0, end=2.0, speaker="SPEAKER_00")],
+            )
+
+        return fake_diarize
+
+    chunks = [
+        {"index": 0, "audioPath": "a.wav", "offsetSec": 0.0},
+        {"index": 1, "audioPath": "b.wav", "offsetSec": 10.0},
+        {"index": 2, "audioPath": "c.wav", "offsetSec": 20.0},
+    ]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        report = run_backend_batch_with_diarize(
+            None,
+            chunks,
+            Path(tmp),
+            num_speakers=2,
+            max_workers=2,
+            diarize_factory=make_fake_diarize,
+        )
+        saved = json.loads((Path(tmp) / "chunk-diarized-results.json").read_text())
+
+    assert report["maxWorkers"] == 2
+    assert len(factory_calls) == 2
+    assert sorted(call[1] for call in calls) == ["a.wav", "b.wav", "c.wav"]
+    assert all(call[2] == {"num_speakers": 2} for call in calls)
+    assert [item["index"] for item in saved] == [0, 1, 2]
+
+
+def test_run_backend_batch_parallelizes_shared_diarize_function():
+    calls = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(2)
+
+    def fake_diarize(audio_path, **kwargs):
+        if audio_path in {"a.wav", "b.wav"}:
+            barrier.wait(timeout=2)
+        with lock:
+            calls.append((audio_path, kwargs))
+        return SimpleNamespace(
+            audio_duration=10.0,
+            segments=[SimpleNamespace(start=0.0, end=2.0, speaker="SPEAKER_00")],
+        )
+
+    chunks = [
+        {"index": 0, "audioPath": "a.wav", "offsetSec": 0.0},
+        {"index": 1, "audioPath": "b.wav", "offsetSec": 10.0},
+        {"index": 2, "audioPath": "c.wav", "offsetSec": 20.0},
+    ]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        report = run_backend_batch_with_diarize(
+            fake_diarize,
+            chunks,
+            Path(tmp),
+            num_speakers=2,
+            max_workers=2,
+        )
+        saved = json.loads((Path(tmp) / "chunk-diarized-results.json").read_text())
+
+    assert report["maxWorkers"] == 2
+    assert sorted(call[0] for call in calls) == ["a.wav", "b.wav", "c.wav"]
+    assert all(call[1] == {"num_speakers": 2} for call in calls)
+    assert [item["index"] for item in saved] == [0, 1, 2]
+
+
 def test_compact_report_supports_batch_reports():
     report = {
         "backend": "diarize",
         "model": "diarize-0.1.2",
         "wallClockSec": 4.0,
+        "maxWorkers": 2,
         "audioDurationSec": 20.0,
         "realtimeFactor": 0.2,
         "speedX": 5.0,
@@ -81,6 +168,7 @@ def test_compact_report_supports_batch_reports():
 
     compact = compact_report(report)
 
+    assert compact["maxWorkers"] == 2
     assert compact["realtimeFactor"] == 0.2
     assert compact["speedX"] == 5.0
     assert compact["speakerCount"] == 2
@@ -125,6 +213,8 @@ def test_dependency_warnings_flag_torchaudio_29():
 if __name__ == "__main__":
     test_build_payload_normalizes_speaker_names()
     test_run_backend_batch_reuses_loaded_diarize_function()
+    test_run_backend_batch_parallelizes_with_worker_factory()
+    test_run_backend_batch_parallelizes_shared_diarize_function()
     test_compact_report_supports_batch_reports()
     test_payload_includes_speaker_centroids_when_available()
     test_reusable_engine_constructs_speaker_once()

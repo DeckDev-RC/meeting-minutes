@@ -892,6 +892,7 @@ fn stitch_modern_cpu_batch_outputs(
 async fn run_modern_cpu_backend_batch(
     audio_chunks: Vec<ExportedChunk>,
     expected_speakers: Option<i32>,
+    max_parallel_chunks: usize,
 ) -> Result<DiarizedResult, String> {
     let current_dir =
         std::env::current_dir().map_err(|e| format!("Failed to resolve current directory: {e}"))?;
@@ -917,7 +918,9 @@ async fn run_modern_cpu_backend_batch(
             .arg("--chunks-json")
             .arg(&chunks_path)
             .arg("--out-dir")
-            .arg(&output_dir);
+            .arg(&output_dir)
+            .arg("--max-workers")
+            .arg(max_parallel_chunks.max(1).to_string());
 
         if let Some(expected_speakers) = expected_speakers.filter(|value| *value > 0) {
             command
@@ -1105,13 +1108,14 @@ pub async fn diarize_audio_chunks_with_modern_cpu(
     audio_chunks: Vec<ExportedChunk>,
     segments: Vec<TranscriptionSegment>,
     expected_speakers: Option<i32>,
-    _max_parallel_chunks: usize,
+    max_parallel_chunks: usize,
 ) -> Result<DiarizedResult, String> {
     if audio_chunks.is_empty() {
         return Err("Modern CPU chunked diarization requires audio chunks".to_string());
     }
 
-    let stitched_turns = run_modern_cpu_backend_batch(audio_chunks, expected_speakers).await?;
+    let stitched_turns =
+        run_modern_cpu_backend_batch(audio_chunks, expected_speakers, max_parallel_chunks).await?;
     if segments.is_empty() {
         return Ok(stitched_turns);
     }
