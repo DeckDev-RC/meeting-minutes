@@ -33,4 +33,7 @@ sherpa-onnx = "1.13.2"
 
 [profile.release]
 codegen-units = 1
-strip = true
+# Tauri patches the final binary with bundle metadata used by the updater.
+# Stripping symbols removes the marker it needs and triggers
+# "__TAURI_BUNDLE_TYPE variable not found in binary" during packaging.
+strip = false
