@@ -15,8 +15,8 @@ git tag v1.0.1
 git push origin v1.0.1
 ```
 
-The workflow builds the Windows MSI/NSIS installers on `windows-latest`, prepares
-the FFmpeg sidecar, creates a draft GitHub Release, and uploads the generated
+The workflow builds the Windows MSI/NSIS installers on `windows-2025`, prepares
+the FFmpeg sidecar, creates a GitHub Release, and uploads the generated
 installers as release assets.
 
 You can also run the workflow manually from GitHub Actions and provide a
