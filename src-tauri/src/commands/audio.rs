@@ -6,11 +6,13 @@ use chrono::{DateTime, Utc};
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
-use tauri::command;
+use tauri::{command, Manager};
 use tauri_plugin_shell::ShellExt;
+use sha2::{Digest, Sha256};
 
 fn command_output_error(context: &str, output: &tauri_plugin_shell::process::Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -69,11 +71,83 @@ fn midpoint(range: &SilenceRange) -> f64 {
 struct SilenceCache {
     noise_db: f64,
     min_duration_sec: f64,
+    #[serde(default)]
+    source_fingerprint: Option<String>,
     ranges: Vec<SilenceRange>,
 }
 
 fn silence_cache_path(audio_path: &str) -> PathBuf {
     Path::new(audio_path).with_extension("silences.json")
+}
+
+const FINGERPRINT_SAMPLE_BYTES: u64 = 256 * 1024;
+
+fn hash_file_sample(
+    file: &mut fs::File,
+    hasher: &mut Sha256,
+    offset: u64,
+    len: usize,
+) -> std::io::Result<()> {
+    file.seek(SeekFrom::Start(offset))?;
+    let mut buffer = vec![0_u8; len];
+    let read = file.read(&mut buffer)?;
+    hasher.update(&buffer[..read]);
+    Ok(())
+}
+
+fn source_audio_fingerprint(input_path: &str) -> Option<String> {
+    let mut file = fs::File::open(input_path).ok()?;
+    let size = file.metadata().ok()?.len();
+    let mut hasher = Sha256::new();
+    hasher.update(size.to_le_bytes());
+
+    let first_len = usize::try_from(size.min(FINGERPRINT_SAMPLE_BYTES)).ok()?;
+    hash_file_sample(&mut file, &mut hasher, 0, first_len).ok()?;
+
+    if size > FINGERPRINT_SAMPLE_BYTES {
+        let tail_offset = size.saturating_sub(FINGERPRINT_SAMPLE_BYTES);
+        let tail_len = usize::try_from(size - tail_offset).ok()?;
+        hash_file_sample(&mut file, &mut hasher, tail_offset, tail_len).ok()?;
+    }
+
+    Some(format!("{:x}", hasher.finalize()))
+}
+
+fn silence_cache_options_slug(noise_db: f64, min_duration_sec: f64) -> String {
+    format!("{noise_db:.1}_{min_duration_sec:.2}")
+        .replace('-', "m")
+        .replace('.', "p")
+}
+
+fn silence_cache_file_name_for_fingerprint(
+    fingerprint: &str,
+    noise_db: f64,
+    min_duration_sec: f64,
+) -> String {
+    format!(
+        "{}-{}.json",
+        fingerprint,
+        silence_cache_options_slug(noise_db, min_duration_sec)
+    )
+}
+
+fn global_silence_cache_path(
+    app: &tauri::AppHandle,
+    input_path: &str,
+    noise_db: f64,
+    min_duration_sec: f64,
+) -> Option<(PathBuf, String)> {
+    let fingerprint = source_audio_fingerprint(input_path)?;
+    let file_name =
+        silence_cache_file_name_for_fingerprint(&fingerprint, noise_db, min_duration_sec);
+    let path = app
+        .path()
+        .app_data_dir()
+        .ok()?
+        .join("audio-cache")
+        .join("silences")
+        .join(file_name);
+    Some((path, fingerprint))
 }
 
 fn silence_cache_matches(cache: &SilenceCache, noise_db: f64, min_duration_sec: f64) -> bool {
@@ -87,15 +161,36 @@ async fn write_silence_cache(
     min_duration_sec: f64,
     ranges: Vec<SilenceRange>,
 ) {
+    write_silence_cache_at_path(
+        silence_cache_path(audio_path),
+        noise_db,
+        min_duration_sec,
+        None,
+        ranges,
+    )
+    .await;
+}
+
+async fn write_silence_cache_at_path(
+    cache_path: PathBuf,
+    noise_db: f64,
+    min_duration_sec: f64,
+    source_fingerprint: Option<String>,
+    ranges: Vec<SilenceRange>,
+) {
     let cache = SilenceCache {
         noise_db,
         min_duration_sec,
+        source_fingerprint,
         ranges,
     };
     let Ok(raw) = serde_json::to_string(&cache) else {
         return;
     };
-    let _ = tokio::fs::write(silence_cache_path(audio_path), raw).await;
+    if let Some(parent) = cache_path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    let _ = tokio::fs::write(cache_path, raw).await;
 }
 
 async fn read_silence_cache(
@@ -103,15 +198,90 @@ async fn read_silence_cache(
     noise_db: f64,
     min_duration_sec: f64,
 ) -> Option<Vec<SilenceRange>> {
-    let raw = tokio::fs::read_to_string(silence_cache_path(audio_path))
-        .await
-        .ok()?;
+    read_silence_cache_at_path(silence_cache_path(audio_path), noise_db, min_duration_sec).await
+}
+
+async fn read_silence_cache_at_path(
+    cache_path: PathBuf,
+    noise_db: f64,
+    min_duration_sec: f64,
+) -> Option<Vec<SilenceRange>> {
+    let raw = tokio::fs::read_to_string(cache_path).await.ok()?;
     let cache = serde_json::from_str::<SilenceCache>(&raw).ok()?;
     if silence_cache_matches(&cache, noise_db, min_duration_sec) {
         Some(cache.ranges)
     } else {
         None
     }
+}
+
+async fn read_global_silence_cache(
+    app: &tauri::AppHandle,
+    input_path: &str,
+    noise_db: f64,
+    min_duration_sec: f64,
+) -> Option<Vec<SilenceRange>> {
+    let (cache_path, _) = global_silence_cache_path(app, input_path, noise_db, min_duration_sec)?;
+    read_silence_cache_at_path(cache_path, noise_db, min_duration_sec).await
+}
+
+async fn write_global_silence_cache(
+    app: &tauri::AppHandle,
+    input_path: &str,
+    noise_db: f64,
+    min_duration_sec: f64,
+    ranges: Vec<SilenceRange>,
+) {
+    let Some((cache_path, fingerprint)) =
+        global_silence_cache_path(app, input_path, noise_db, min_duration_sec)
+    else {
+        return;
+    };
+    write_silence_cache_at_path(
+        cache_path,
+        noise_db,
+        min_duration_sec,
+        Some(fingerprint),
+        ranges,
+    )
+    .await;
+}
+
+async fn cached_or_detect_silences(
+    app: tauri::AppHandle,
+    input_path: String,
+    local_cache_audio_path: Option<String>,
+    noise_db: f64,
+    min_duration_sec: f64,
+) -> Vec<SilenceRange> {
+    if let Some(local_path) = local_cache_audio_path.as_deref() {
+        if let Some(cached) = read_silence_cache(local_path, noise_db, min_duration_sec).await {
+            return cached;
+        }
+    }
+
+    if let Some(cached) = read_silence_cache(&input_path, noise_db, min_duration_sec).await {
+        return cached;
+    }
+
+    if let Some(cached) =
+        read_global_silence_cache(&app, &input_path, noise_db, min_duration_sec).await
+    {
+        if let Some(local_path) = local_cache_audio_path.as_deref() {
+            write_silence_cache(local_path, noise_db, min_duration_sec, cached.clone()).await;
+        }
+        return cached;
+    }
+
+    let silences = detect_silences(app.clone(), input_path.clone(), noise_db, min_duration_sec)
+        .await
+        .unwrap_or_default();
+    if let Some(local_path) = local_cache_audio_path.as_deref() {
+        write_silence_cache(local_path, noise_db, min_duration_sec, silences.clone()).await;
+    }
+    write_global_silence_cache(&app, &input_path, noise_db, min_duration_sec, silences.clone())
+        .await;
+    silences
 }
 
 fn find_cut_point(desired_end: f64, min_end: f64, max_end: f64, silences: &[SilenceRange]) -> f64 {
@@ -853,24 +1023,14 @@ pub async fn create_smart_chunks(
     let opts = options.unwrap_or_default();
     fs::create_dir_all(&output_dir).map_err(|e| e.to_string())?;
 
-    let silences = if let Some(cached) = read_silence_cache(
-        &input_path,
+    let silences = cached_or_detect_silences(
+        app.clone(),
+        input_path.clone(),
+        None,
         opts.silence_noise_db,
         opts.silence_min_duration_sec,
     )
-    .await
-    {
-        cached
-    } else {
-        detect_silences(
-            app.clone(),
-            input_path.clone(),
-            opts.silence_noise_db,
-            opts.silence_min_duration_sec,
-        )
-        .await
-        .unwrap_or_default()
-    };
+    .await;
 
     let plans = plan_smart_chunks(
         duration_sec,
@@ -943,7 +1103,7 @@ async fn prepare_audio_and_chunks_single_pass(
     let silence_filter = build_silence_filter(opts.silence_noise_db, opts.silence_min_duration_sec);
     let stderr = run_extract_audio(
         app.clone(),
-        input_path,
+        input_path.clone(),
         audio_output_path.clone(),
         Some(silence_filter),
     )
@@ -957,6 +1117,14 @@ async fn prepare_audio_and_chunks_single_pass(
 
     write_silence_cache(
         &audio_output_path,
+        opts.silence_noise_db,
+        opts.silence_min_duration_sec,
+        silences.clone(),
+    )
+    .await;
+    write_global_silence_cache(
+        &app,
+        &input_path,
         opts.silence_noise_db,
         opts.silence_min_duration_sec,
         silences.clone(),
@@ -1019,24 +1187,18 @@ pub async fn prepare_audio_and_chunks(
         None,
     );
 
+    let audio_cache_path = audio_output_path.clone();
     let chunk_future = async {
         let duration_future = get_duration(&app, &input_path);
-        let silence_future = detect_silences(
+        let silence_future = cached_or_detect_silences(
             app.clone(),
             input_path.clone(),
+            Some(audio_cache_path.clone()),
             opts.silence_noise_db,
             opts.silence_min_duration_sec,
         );
         let (duration, silences) = tokio::join!(duration_future, silence_future);
         let duration = duration?;
-        let silences = silences.unwrap_or_default();
-        write_silence_cache(
-            &audio_output_path,
-            opts.silence_noise_db,
-            opts.silence_min_duration_sec,
-            silences.clone(),
-        )
-        .await;
 
         let plans = plan_smart_chunks(
             duration,
@@ -1342,6 +1504,48 @@ mod tests {
 
         opts.prepare_strategy = Some("singlePassSilence".to_string());
         assert!(!should_use_parallel_prepare(&opts));
+    }
+
+    #[test]
+    fn source_audio_fingerprint_is_content_based_across_paths() {
+        let dir = std::env::temp_dir().join(format!(
+            "meeting-minutes-audio-fingerprint-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("a.raw");
+        let second = dir.join("b.raw");
+        let different = dir.join("c.raw");
+        let payload = vec![7_u8; (FINGERPRINT_SAMPLE_BYTES as usize) + 128];
+        std::fs::write(&first, &payload).unwrap();
+        std::fs::write(&second, &payload).unwrap();
+        std::fs::write(&different, vec![8_u8; (FINGERPRINT_SAMPLE_BYTES as usize) + 128])
+            .unwrap();
+
+        assert_eq!(
+            source_audio_fingerprint(first.to_str().unwrap()),
+            source_audio_fingerprint(second.to_str().unwrap())
+        );
+        assert_ne!(
+            source_audio_fingerprint(first.to_str().unwrap()),
+            source_audio_fingerprint(different.to_str().unwrap())
+        );
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn global_silence_cache_file_name_includes_detection_options() {
+        let fingerprint = "abc123";
+
+        assert_ne!(
+            silence_cache_file_name_for_fingerprint(fingerprint, -35.0, 0.5),
+            silence_cache_file_name_for_fingerprint(fingerprint, -40.0, 0.5)
+        );
+        assert_ne!(
+            silence_cache_file_name_for_fingerprint(fingerprint, -35.0, 0.5),
+            silence_cache_file_name_for_fingerprint(fingerprint, -35.0, 0.8)
+        );
     }
 
     #[test]

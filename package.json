@@ -1,6 +1,6 @@
 {
   "name": "meeting-minutes",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "type": "module",
   "scripts": {
@@ -23,6 +23,10 @@
     "benchmark:transcribe-parakeet": ".venv-parakeet\\\\Scripts\\\\python.exe scripts\\\\transcribe_parakeet_backend.py",
     "setup:diarize-cpu": "python -m venv .venv-diarize && .venv-diarize\\\\Scripts\\\\python.exe -m pip install --upgrade pip && .venv-diarize\\\\Scripts\\\\python.exe -m pip install -r scripts\\\\requirements-diarize-cpu.txt",
     "benchmark:diarize-cpu": ".venv-diarize\\\\Scripts\\\\python.exe scripts\\\\diarize_cpu_backend.py",
+    "runtime:diarize:stage": "powershell -ExecutionPolicy Bypass -File scripts\\\\stage_diarize_runtime_resource.ps1",
+    "runtime:diarize:pack": "powershell -ExecutionPolicy Bypass -File scripts\\\\build_diarize_runtime_pack.ps1",
+    "runtime:diarize:install": "powershell -ExecutionPolicy Bypass -File scripts\\\\install_diarize_runtime_pack.ps1",
+    "test:runtime-pack": "node scripts/diarizeRuntimePack.test.mjs",
     "compare:diarization": "node scripts/compareDiarizationBenchmarks.mjs",
     "check:pyannote": "powershell -ExecutionPolicy Bypass -File scripts\\\\check_hf_pyannote_access.ps1",
     "setup:pyannote": "python -m venv .venv-pyannote && .venv-pyannote\\\\Scripts\\\\python.exe -m pip install --upgrade pip && .venv-pyannote\\\\Scripts\\\\python.exe -m pip install pyannote.audio",

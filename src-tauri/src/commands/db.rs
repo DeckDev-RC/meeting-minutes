@@ -109,6 +109,39 @@ fn meetings_has_column(conn: &Connection, column_name: &str) -> Result<bool, rus
     Ok(false)
 }
 
+fn transcriptions_has_column(
+    conn: &Connection,
+    column_name: &str,
+) -> Result<bool, rusqlite::Error> {
+    let mut stmt = conn.prepare("PRAGMA table_info(transcriptions)")?;
+    let mut rows = stmt.query([])?;
+
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column_name {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn add_transcription_column_if_missing(
+    conn: &Connection,
+    column_name: &str,
+    definition: &str,
+) -> Result<(), rusqlite::Error> {
+    if transcriptions_has_column(conn, column_name)? {
+        return Ok(());
+    }
+
+    conn.execute(
+        &format!("ALTER TABLE transcriptions ADD COLUMN {definition}"),
+        [],
+    )?;
+    Ok(())
+}
+
 fn add_meeting_column_if_missing(
     conn: &Connection,
     column_name: &str,
@@ -130,6 +163,11 @@ fn migrate_meetings_metadata(conn: &Connection) -> Result<(), rusqlite::Error> {
         "processing_profile TEXT NOT NULL DEFAULT 'balanced'",
     )?;
     add_meeting_column_if_missing(conn, "transcription_profile", "transcription_profile TEXT")?;
+    Ok(())
+}
+
+fn migrate_transcriptions_speaker_map(conn: &Connection) -> Result<(), rusqlite::Error> {
+    add_transcription_column_if_missing(conn, "speaker_map", "speaker_map TEXT")?;
     Ok(())
 }
 
@@ -173,6 +211,7 @@ pub fn init_db(app_data_dir: &std::path::Path) -> Connection {
             raw_whisper TEXT,
             diarized TEXT,
             speakers TEXT,
+            speaker_map TEXT,
             language TEXT DEFAULT 'pt',
             created_at TEXT NOT NULL
         );
@@ -214,6 +253,8 @@ pub fn init_db(app_data_dir: &std::path::Path) -> Connection {
     migrate_processing_chunk_fact_cache(&conn)
         .expect("Failed to migrate processing chunk fact cache schema");
     migrate_meetings_metadata(&conn).expect("Failed to migrate meetings metadata schema");
+    migrate_transcriptions_speaker_map(&conn)
+        .expect("Failed to migrate transcriptions speaker map schema");
 
     conn
 }
@@ -504,6 +545,90 @@ pub fn save_transcription(
 }
 
 #[command]
+pub fn get_transcription_by_meeting(
+    state: tauri::State<'_, DbState>,
+    meeting_id: String,
+) -> Result<Option<serde_json::Value>, String> {
+    let db = state.0.lock().map_err(|e| e.to_string())?;
+    let mut stmt = db
+        .prepare(
+            "SELECT id, meeting_id, raw_whisper, diarized, speakers, speaker_map, language, created_at
+             FROM transcriptions
+             WHERE meeting_id = ?1
+             ORDER BY created_at DESC
+             LIMIT 1",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let result = stmt.query_row(params![meeting_id], |row| {
+        let id: String = row.get(0)?;
+        let mid: String = row.get(1)?;
+        let raw_whisper: Option<String> = row.get(2)?;
+        let diarized: Option<String> = row.get(3)?;
+        let speakers: Option<String> = row.get(4)?;
+        let speaker_map: Option<String> = row.get(5)?;
+        let language: Option<String> = row.get(6)?;
+        let created: String = row.get(7)?;
+        Ok(serde_json::json!({
+            "id": id,
+            "meeting_id": mid,
+            "raw_whisper": raw_whisper,
+            "diarized": diarized,
+            "speakers": speakers,
+            "speaker_map": speaker_map,
+            "language": language,
+            "created_at": created,
+        }))
+    });
+
+    match result {
+        Ok(val) => Ok(Some(val)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[command]
+pub fn save_speaker_map(
+    state: tauri::State<'_, DbState>,
+    meeting_id: String,
+    speaker_map: String,
+) -> Result<(), String> {
+    let parsed = serde_json::from_str::<serde_json::Value>(&speaker_map)
+        .map_err(|e| format!("invalid speaker_map JSON: {e}"))?;
+    let object = parsed
+        .as_object()
+        .ok_or_else(|| "speaker_map must be a JSON object".to_string())?;
+    if object
+        .iter()
+        .any(|(speaker, name)| speaker.trim().is_empty() || !name.is_string())
+    {
+        return Err("speaker_map must map speaker labels to names".to_string());
+    }
+
+    let db = state.0.lock().map_err(|e| e.to_string())?;
+    let affected = db
+        .execute(
+            "UPDATE transcriptions
+             SET speaker_map = ?1
+             WHERE id = (
+                SELECT id FROM transcriptions
+                WHERE meeting_id = ?2
+                ORDER BY created_at DESC
+                LIMIT 1
+             )",
+            params![speaker_map, meeting_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+    if affected == 0 {
+        return Err("no transcription found for meeting".to_string());
+    }
+
+    Ok(())
+}
+
+#[command]
 pub fn save_minutes(
     state: tauri::State<'_, DbState>,
     meeting_id: String,
@@ -613,6 +738,14 @@ mod tests {
             .collect()
     }
 
+    fn transcription_columns(conn: &Connection) -> HashSet<String> {
+        let mut stmt = conn.prepare("PRAGMA table_info(transcriptions)").unwrap();
+        stmt.query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
     #[test]
     fn init_db_creates_fact_cache_columns_for_new_databases() {
         let dir = temp_app_dir("fact-columns-new");
@@ -672,6 +805,45 @@ mod tests {
         assert!(columns.contains("participants_hint"));
         assert!(columns.contains("processing_profile"));
         assert!(columns.contains("transcription_profile"));
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn init_db_creates_speaker_map_column_for_new_databases() {
+        let dir = temp_app_dir("speaker-map-new");
+        let conn = init_db(&dir);
+
+        let columns = transcription_columns(&conn);
+
+        assert!(columns.contains("speaker_map"));
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn init_db_migrates_existing_transcriptions_to_speaker_map_column() {
+        let dir = temp_app_dir("speaker-map-migration");
+        let db_path = dir.join("db.sqlite");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE transcriptions (
+                id TEXT PRIMARY KEY,
+                meeting_id TEXT NOT NULL,
+                raw_whisper TEXT,
+                diarized TEXT,
+                speakers TEXT,
+                language TEXT DEFAULT 'pt',
+                created_at TEXT NOT NULL
+            )",
+        )
+        .unwrap();
+        drop(conn);
+
+        let migrated = init_db(&dir);
+        let columns = transcription_columns(&migrated);
+
+        assert!(columns.contains("speaker_map"));
 
         std::fs::remove_dir_all(dir).ok();
     }

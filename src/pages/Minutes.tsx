@@ -2,10 +2,37 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import MinutesPreview from "../components/MinutesPreview";
 import ExportButton from "../components/ExportButton";
-import { getMinutesByMeeting, getProcessingChunks } from "../lib/tauri";
-import type { MeetingAction, MeetingChunkInsights, MeetingDecision } from "../lib/types";
+import SpeakerMapPanel from "../components/SpeakerMapPanel";
+import {
+  getMinutesByMeeting,
+  getProcessingChunks,
+  getTranscriptionByMeeting,
+  saveSpeakerMap,
+} from "../lib/tauri";
+import {
+  sanitizeMeetingChunkInsights,
+  summarizeEvidenceValidation,
+  validateMeetingInsightsEvidence,
+  type EvidenceValidationItem,
+} from "../lib/minutesEvidence";
+import type {
+  DiarizedSegment,
+  DiarizedResult,
+  MeetingAction,
+  MeetingChunkInsights,
+  MeetingDecision,
+  ProcessingChunkRecord,
+  TranscriptionSegment,
+} from "../lib/types";
+import {
+  applySpeakerMapToText,
+  extractSpeakerLabels,
+  normalizeSpeakerMap,
+  parseSpeakerMapJson,
+  type SpeakerMap,
+} from "../lib/speakerMap";
 
-type MinutesTab = "minutes" | "insights";
+type MinutesTab = "minutes" | "insights" | "speakers";
 
 const formatTime = (seconds: number) => {
   const safe = Math.max(0, Math.round(Number.isFinite(seconds) ? seconds : 0));
@@ -37,7 +64,7 @@ const isMeetingChunkInsights = (value: unknown): value is MeetingChunkInsights =
 const parseInsightJson = (json: string | null): MeetingChunkInsights | null => {
   if (!json) return null;
   try {
-    const parsed = JSON.parse(json) as unknown;
+    const parsed = sanitizeMeetingChunkInsights(JSON.parse(json) as unknown);
     return isMeetingChunkInsights(parsed) ? parsed : null;
   } catch {
     return null;
@@ -47,7 +74,84 @@ const parseInsightJson = (json: string | null): MeetingChunkInsights | null => {
 const joinMeta = (...items: Array<string | null | undefined>) =>
   items.map((item) => item?.trim()).filter(Boolean).join(" · ");
 
-function DecisionItem({ decision }: { decision: MeetingDecision }) {
+const parseStringArrayJson = (json: string | null | undefined): string[] => {
+  if (!json) return [];
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+};
+
+const parseDiarizedSegmentsJson = (json: string | null | undefined): DiarizedSegment[] => {
+  if (!json) return [];
+  try {
+    const parsed = JSON.parse(json) as Partial<DiarizedResult>;
+    if (!Array.isArray(parsed.segments)) return [];
+    return parsed.segments.filter((segment): segment is DiarizedSegment => (
+      Boolean(segment) &&
+      typeof segment.speaker === "string" &&
+      typeof segment.start === "number" &&
+      typeof segment.end === "number" &&
+      typeof segment.text === "string"
+    ));
+  } catch {
+    return [];
+  }
+};
+
+const parseStoredSegments = (json: string | null): TranscriptionSegment[] => {
+  if (!json) return [];
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((segment) => {
+        if (!segment || typeof segment !== "object") return null;
+        const item = segment as Partial<TranscriptionSegment>;
+        if (
+          typeof item.start !== "number" ||
+          typeof item.end !== "number" ||
+          typeof item.text !== "string"
+        ) {
+          return null;
+        }
+        return {
+          id: typeof item.id === "number" ? item.id : 0,
+          start: item.start,
+          end: item.end,
+          text: item.text,
+        };
+      })
+      .filter((segment): segment is TranscriptionSegment => Boolean(segment));
+  } catch {
+    return [];
+  }
+};
+
+function EvidenceBadge({ validation }: { validation?: EvidenceValidationItem }) {
+  if (!validation) return null;
+  return (
+    <span
+      className={`mt-2 inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+        validation.verified
+          ? "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100"
+          : "bg-amber-50 text-amber-700 ring-1 ring-amber-100"
+      }`}
+    >
+      Evidencia {validation.verified ? "verificada" : "fraca"} · {Math.round(validation.score * 100)}%
+    </span>
+  );
+}
+
+function DecisionItem({
+  decision,
+  validation,
+}: {
+  decision: MeetingDecision;
+  validation?: EvidenceValidationItem;
+}) {
   return (
     <li className="rounded-lg border border-gray-100 bg-white px-3 py-2">
       <p className="text-sm font-medium leading-6 text-gray-900">{decision.title}</p>
@@ -57,11 +161,18 @@ function DecisionItem({ decision }: { decision: MeetingDecision }) {
       {decision.evidence && (
         <p className="mt-1 text-xs leading-5 text-gray-500">Evidencia: {decision.evidence}</p>
       )}
+      <EvidenceBadge validation={validation} />
     </li>
   );
 }
 
-function ActionItem({ action }: { action: MeetingAction }) {
+function ActionItem({
+  action,
+  validation,
+}: {
+  action: MeetingAction;
+  validation?: EvidenceValidationItem;
+}) {
   return (
     <li className="rounded-lg border border-gray-100 bg-white px-3 py-2">
       <p className="text-sm font-medium leading-6 text-gray-900">{action.task}</p>
@@ -75,6 +186,7 @@ function ActionItem({ action }: { action: MeetingAction }) {
       {action.evidence && (
         <p className="mt-1 text-xs leading-5 text-gray-500">Evidencia: {action.evidence}</p>
       )}
+      <EvidenceBadge validation={validation} />
     </li>
   );
 }
@@ -83,6 +195,9 @@ export default function Minutes() {
   const { id } = useParams<{ id: string }>();
   const [html, setHtml] = useState<string | null>(null);
   const [insights, setInsights] = useState<MeetingChunkInsights[]>([]);
+  const [chunks, setChunks] = useState<ProcessingChunkRecord[]>([]);
+  const [speakerLabels, setSpeakerLabels] = useState<string[]>([]);
+  const [speakerMap, setSpeakerMap] = useState<SpeakerMap>({});
   const [activeTab, setActiveTab] = useState<MinutesTab>("minutes");
   const title = "Ata de Reuniao";
 
@@ -93,13 +208,21 @@ export default function Minutes() {
 
   const loadMinutes = async (meetingId: string) => {
     try {
-      const [data, chunks] = await Promise.all([
+      const [data, chunks, transcription] = await Promise.all([
         getMinutesByMeeting(meetingId),
         getProcessingChunks(meetingId).catch(() => []),
+        getTranscriptionByMeeting(meetingId).catch(() => null),
       ]);
       if (data) {
         setHtml(data.html_content);
       }
+      setChunks(chunks);
+      const labels = extractSpeakerLabels(
+        parseStringArrayJson(transcription?.speakers),
+        parseDiarizedSegmentsJson(transcription?.diarized),
+      );
+      setSpeakerLabels(labels);
+      setSpeakerMap(normalizeSpeakerMap(labels, parseSpeakerMapJson(transcription?.speaker_map)));
       setInsights(
         chunks
           .map((chunk) => parseInsightJson(chunk.factsJson))
@@ -121,6 +244,33 @@ export default function Minutes() {
     }),
     [insights],
   );
+  const evidenceByChunk = useMemo(() => {
+    const chunksByIndex = new Map(chunks.map((chunk) => [chunk.index, chunk]));
+    return new Map(
+      insights.map((item) => {
+        const sourceChunk = chunksByIndex.get(item.chunkIndex);
+        return [
+          item.chunkIndex,
+          validateMeetingInsightsEvidence(item, parseStoredSegments(sourceChunk?.rawSegmentsJson ?? null)),
+        ] as const;
+      }),
+    );
+  }, [chunks, insights]);
+  const evidenceTotals = useMemo(
+    () => summarizeEvidenceValidation(Array.from(evidenceByChunk.values())),
+    [evidenceByChunk],
+  );
+  const previewHtml = useMemo(
+    () => (html ? applySpeakerMapToText(html, speakerMap) : null),
+    [html, speakerMap],
+  );
+
+  const handleSaveSpeakerMap = async (nextMap: SpeakerMap) => {
+    if (!id) return;
+    const normalized = normalizeSpeakerMap(speakerLabels, nextMap);
+    await saveSpeakerMap(id, normalized);
+    setSpeakerMap(normalized);
+  };
 
   if (!html) {
     return (
@@ -148,6 +298,7 @@ export default function Minutes() {
         {[
           { key: "minutes" as const, label: "Ata", count: 1 },
           { key: "insights" as const, label: "Insights", count: insights.length },
+          { key: "speakers" as const, label: "Falantes", count: speakerLabels.length },
         ].map((tab) => {
           const selected = activeTab === tab.key;
           return (
@@ -177,8 +328,10 @@ export default function Minutes() {
 
       {activeTab === "minutes" ? (
         <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm md:p-8">
-          <MinutesPreview html={html} />
+          <MinutesPreview html={previewHtml ?? html} />
         </div>
+      ) : activeTab === "speakers" ? (
+        <SpeakerMapPanel labels={speakerLabels} value={speakerMap} onSave={handleSaveSpeakerMap} />
       ) : (
         <section className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm md:p-6">
           <div className="flex flex-col gap-3 border-b border-gray-100 pb-4 sm:flex-row sm:items-start sm:justify-between">
@@ -191,13 +344,14 @@ export default function Minutes() {
                 Decisoes, acoes, riscos e perguntas continuam disponiveis depois da ata.
               </p>
             </div>
-            <dl className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-5">
+            <dl className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-3 lg:grid-cols-6">
               {[
                 ["Chunks", insights.length],
                 ["Topicos", insightTotals.topics],
                 ["Decisoes", insightTotals.decisions],
                 ["Acoes", insightTotals.actions],
                 ["Riscos", insightTotals.risks],
+                ["Evidencias", `${evidenceTotals.verified}/${evidenceTotals.total}`],
               ].map(([label, value]) => (
                 <div key={label} className="rounded-lg bg-gray-50 px-3 py-2">
                   <dt className="text-xs font-medium uppercase tracking-wide text-gray-500">
@@ -215,7 +369,20 @@ export default function Minutes() {
             </p>
           ) : (
             <div className="mt-4 space-y-4">
-              {insights.map((item) => (
+              {insights.map((item) => {
+                const validation = evidenceByChunk.get(item.chunkIndex);
+                const validationFor = (
+                  kind: EvidenceValidationItem["kind"],
+                  label: string,
+                  evidence: string,
+                ) =>
+                  validation?.items.find(
+                    (entry) =>
+                      entry.kind === kind &&
+                      entry.label === label &&
+                      entry.evidence === evidence,
+                  );
+                return (
                 <article
                   key={item.chunkIndex}
                   className="rounded-lg border border-gray-100 bg-gray-50 px-4 py-3"
@@ -262,7 +429,11 @@ export default function Minutes() {
                         </p>
                         <ul className="mt-2 space-y-2">
                           {item.decisions.map((decision) => (
-                            <DecisionItem key={`${decision.timestampSec}:${decision.title}`} decision={decision} />
+                            <DecisionItem
+                              key={`${decision.timestampSec}:${decision.title}`}
+                              decision={decision}
+                              validation={validationFor("decision", decision.title, decision.evidence)}
+                            />
                           ))}
                         </ul>
                       </div>
@@ -274,7 +445,11 @@ export default function Minutes() {
                         </p>
                         <ul className="mt-2 space-y-2">
                           {item.actions.map((action) => (
-                            <ActionItem key={`${action.timestampSec}:${action.task}`} action={action} />
+                            <ActionItem
+                              key={`${action.timestampSec}:${action.task}`}
+                              action={action}
+                              validation={validationFor("action", action.task, action.evidence)}
+                            />
                           ))}
                         </ul>
                       </div>
@@ -305,7 +480,8 @@ export default function Minutes() {
                     )}
                   </div>
                 </article>
-              ))}
+                );
+              })}
             </div>
           )}
         </section>

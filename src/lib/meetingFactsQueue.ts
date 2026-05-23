@@ -4,6 +4,7 @@ import type {
   ProcessingChunkRecord,
   TranscriptionSegment,
 } from './types';
+import { sanitizeMeetingChunkInsights } from './minutesEvidence';
 
 export interface MeetingFactsDoneEvent {
   chunkIndex: number;
@@ -89,7 +90,7 @@ function parseCachedFacts(chunk: ProcessingChunkRecord): MeetingChunkInsights | 
   }
 
   try {
-    const parsed = JSON.parse(chunk.factsJson) as MeetingChunkInsights;
+    const parsed = sanitizeMeetingChunkInsights(JSON.parse(chunk.factsJson) as unknown);
     if (
       typeof parsed.chunkIndex === 'number' &&
       typeof parsed.startSec === 'number' &&
@@ -286,7 +287,9 @@ export async function extractMeetingFactsConcurrently({
           }
 
           await Promise.all(batch.items.map(async (item) => {
-            const insights = byChunkIndex.get(item.chunk.index) ?? fallbackInsightsForChunk(item.chunk, item.segments);
+            const insights = sanitizeMeetingChunkInsights(
+              byChunkIndex.get(item.chunk.index) ?? fallbackInsightsForChunk(item.chunk, item.segments)
+            );
             await persistFactStatus(updateChunkFacts, item.chunk, 'done', JSON.stringify(insights));
             results.set(item.chunk.index, insights);
             extractedChunks += 1;
@@ -324,7 +327,7 @@ export async function extractMeetingFactsConcurrently({
       try {
         runningPersist = persistFactStatus(updateChunkFacts, chunk, 'running').catch(() => {});
         const segments = parseSegments(chunk);
-        const insights = await chunkExtractor(chunk, segments, apiKey);
+        const insights = sanitizeMeetingChunkInsights(await chunkExtractor(chunk, segments, apiKey));
 
         if (failed) {
           return;

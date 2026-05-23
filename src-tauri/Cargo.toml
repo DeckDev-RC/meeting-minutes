@@ -1,6 +1,6 @@
 [package]
 name = "meeting-minutes"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 default-run = "meeting-minutes"
 
@@ -30,6 +30,8 @@ uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 rusqlite = { version = "0.31", features = ["bundled"] }
 sherpa-onnx = "1.13.2"
+keyring = { version = "3.6.3", features = ["windows-native"] }
+sha2 = "0.10"
 
 [profile.release]
 codegen-units = 1

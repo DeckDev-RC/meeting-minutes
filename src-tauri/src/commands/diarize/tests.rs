@@ -465,6 +465,68 @@ fn modern_cpu_backend_paths_point_to_project_tools() {
 }
 
 #[test]
+fn modern_cpu_backend_exists_requires_python_and_script() {
+    let root = std::env::temp_dir().join(format!(
+        "meeting-minutes-modern-backend-test-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let paths = modern_cpu_backend_paths(&root);
+
+    std::fs::create_dir_all(paths.python_exe.parent().unwrap()).unwrap();
+    std::fs::File::create(&paths.python_exe).unwrap();
+    assert!(!modern_cpu_backend_exists(&paths));
+
+    std::fs::create_dir_all(paths.script_path.parent().unwrap()).unwrap();
+    std::fs::File::create(&paths.script_path).unwrap();
+    assert!(modern_cpu_backend_exists(&paths));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn resolve_modern_cpu_backend_from_dir_finds_ancestor_runtime() {
+    let root = std::env::temp_dir().join(format!(
+        "meeting-minutes-modern-backend-root-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let nested = root.join("nested").join("child");
+    let paths = modern_cpu_backend_paths(&root);
+
+    std::fs::create_dir_all(paths.python_exe.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(paths.script_path.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::File::create(&paths.python_exe).unwrap();
+    std::fs::File::create(&paths.script_path).unwrap();
+
+    let resolved = resolve_modern_cpu_backend_from_dir(&nested).unwrap();
+    assert_eq!(resolved, paths);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn bundled_modern_cpu_backend_root_uses_resource_diarize_directory() {
+    let resource_dir = std::env::temp_dir().join(format!(
+        "meeting-minutes-modern-backend-resource-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let runtime_root = resource_dir.join("diarize");
+    let paths = modern_cpu_backend_paths(&runtime_root);
+
+    std::fs::create_dir_all(paths.python_exe.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(paths.script_path.parent().unwrap()).unwrap();
+    std::fs::File::create(&paths.python_exe).unwrap();
+    std::fs::File::create(&paths.script_path).unwrap();
+
+    assert_eq!(
+        bundled_modern_cpu_backend_root(&resource_dir),
+        Some(runtime_root)
+    );
+
+    let _ = std::fs::remove_dir_all(resource_dir);
+}
+
+#[test]
 fn pyannote_backend_paths_point_to_project_tools() {
     let root = std::path::Path::new("C:/project");
     let paths = pyannote_backend_paths(root);

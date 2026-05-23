@@ -50,6 +50,17 @@ export interface MinutesData {
   created_at: string;
 }
 
+export interface TranscriptionData {
+  id: string;
+  meeting_id: string;
+  raw_whisper: string | null;
+  diarized: string | null;
+  speakers: string | null;
+  speaker_map: string | null;
+  language: string | null;
+  created_at: string;
+}
+
 export interface TranscriptionSegment {
   id: number;
   start: number;

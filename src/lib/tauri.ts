@@ -12,6 +12,7 @@ import type {
   SilenceRange,
   SmartChunkOptions,
   SpeakerTurn,
+  TranscriptionData,
   TranscriptionSegment,
 } from './types';
 import type { FactBatchItem } from './meetingFactsQueue';
@@ -313,6 +314,12 @@ export const updateMeetingStatus = (id: string, status: string) =>
 
 export const saveTranscription = (meetingId: string, rawWhisper: string, diarized: string, speakers: string) =>
   invoke<void>('save_transcription', { meetingId, rawWhisper, diarized, speakers });
+
+export const getTranscriptionByMeeting = (meetingId: string) =>
+  invoke<TranscriptionData | null>('get_transcription_by_meeting', { meetingId });
+
+export const saveSpeakerMap = (meetingId: string, speakerMap: Record<string, string>) =>
+  invoke<void>('save_speaker_map', { meetingId, speakerMap: JSON.stringify(speakerMap) });
 
 export const saveMinutes = (meetingId: string, htmlContent: string, pdfPath?: string) =>
   invoke<void>('save_minutes', { meetingId, htmlContent, pdfPath, modelUsed: 'gemini-2.5-flash' });

@@ -1,12 +1,12 @@
 {
   "productName": "Meeting Minutes AI",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "identifier": "com.agregar.meeting-minutes",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeBuildCommand": "npm run build && npm run runtime:diarize:stage"
   },
   "app": {
     "windows": [
@@ -32,6 +32,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/ffmpeg"]
+    "externalBin": ["binaries/ffmpeg"],
+    "resources": {
+      "resources/diarize": "diarize"
+    }
   }
 }

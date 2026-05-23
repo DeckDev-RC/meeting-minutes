@@ -109,8 +109,8 @@ export default function Settings() {
       <header>
         <h2 className="text-2xl font-bold text-gray-950">Configuracoes</h2>
         <p className="mt-2 text-sm leading-6 text-gray-600">
-          Guarde as chaves usadas nas etapas que ainda dependem de API. Elas ficam no
-          armazenamento local do app.
+          Guarde as chaves usadas nas etapas que ainda dependem de API. Os segredos ficam no
+          cofre nativo do Windows; apenas perfis e preferencias ficam no arquivo de configuracao.
         </p>
       </header>
 

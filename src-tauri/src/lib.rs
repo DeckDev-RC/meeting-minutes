@@ -21,6 +21,53 @@ fn stored_string_or_env(
         .unwrap_or_default()
 }
 
+fn stored_secret_or_env(
+    store: &tauri_plugin_store::Store<tauri::Wry>,
+    secret_key: &str,
+    env_key: &str,
+) -> String {
+    commands::keyring::get_api_secret_value(secret_key)
+        .ok()
+        .flatten()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            store
+                .get(secret_key)
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .filter(|value| !value.trim().is_empty())
+        })
+        .or_else(|| std::env::var(env_key).ok())
+        .unwrap_or_default()
+}
+
+fn migrate_legacy_secret_to_keyring(
+    store: &tauri_plugin_store::Store<tauri::Wry>,
+    secret_key: &str,
+) -> bool {
+    if commands::keyring::get_api_secret_value(secret_key)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return false;
+    }
+
+    let Some(legacy) = store
+        .get(secret_key)
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return false;
+    };
+
+    if commands::keyring::set_api_secret_value(secret_key, &legacy).is_err() {
+        return false;
+    }
+
+    store.delete(secret_key);
+    true
+}
+
 fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
         .pool_max_idle_per_host(4)
@@ -40,13 +87,26 @@ fn normalize_speaker_diarization_runtime(value: Option<String>) -> String {
 #[tauri::command]
 fn get_api_keys(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     let store = app.store("config.json").map_err(|e| e.to_string())?;
-    let groq = stored_string_or_env(&store, "groq_api_key", "GROQ_API_KEY");
-    let gemini = stored_string_or_env(&store, "gemini_api_key", "GEMINI_API_KEY");
+    let migrated = [
+        "groq_api_key",
+        "gemini_api_key",
+        "cloudflare_api_token",
+        "deepgram_api_key",
+    ]
+    .iter()
+    .any(|secret_key| migrate_legacy_secret_to_keyring(&store, secret_key));
+    if migrated {
+        let _ = store.save();
+    }
+
+    let groq = stored_secret_or_env(&store, "groq_api_key", "GROQ_API_KEY");
+    let gemini = stored_secret_or_env(&store, "gemini_api_key", "GEMINI_API_KEY");
     let cloudflare_account_id =
         stored_string_or_env(&store, "cloudflare_account_id", "CLOUDFLARE_ACCOUNT_ID");
     let cloudflare_api_token =
-        stored_string_or_env(&store, "cloudflare_api_token", "CLOUDFLARE_API_TOKEN");
-    let deepgram_api_key = stored_string_or_env(&store, "deepgram_api_key", "DEEPGRAM_API_KEY");
+        stored_secret_or_env(&store, "cloudflare_api_token", "CLOUDFLARE_API_TOKEN");
+    let deepgram_api_key =
+        stored_secret_or_env(&store, "deepgram_api_key", "DEEPGRAM_API_KEY");
     let transcription_profile = store
         .get("transcription_profile")
         .and_then(|v| v.as_str().map(|s| s.to_string()))
@@ -92,19 +152,17 @@ fn set_api_keys(
     expected_speakers: Option<i32>,
 ) -> Result<(), String> {
     let store = app.store("config.json").map_err(|e| e.to_string())?;
-    store.set("groq_api_key", serde_json::Value::String(groq));
-    store.set("gemini_api_key", serde_json::Value::String(gemini));
+    commands::keyring::set_api_secret_value("groq_api_key", &groq)?;
+    commands::keyring::set_api_secret_value("gemini_api_key", &gemini)?;
+    commands::keyring::set_api_secret_value("cloudflare_api_token", &cloudflare_api_token)?;
+    commands::keyring::set_api_secret_value("deepgram_api_key", &deepgram_api_key)?;
+    store.delete("groq_api_key");
+    store.delete("gemini_api_key");
+    store.delete("cloudflare_api_token");
+    store.delete("deepgram_api_key");
     store.set(
         "cloudflare_account_id",
         serde_json::Value::String(cloudflare_account_id),
-    );
-    store.set(
-        "cloudflare_api_token",
-        serde_json::Value::String(cloudflare_api_token),
-    );
-    store.set(
-        "deepgram_api_key",
-        serde_json::Value::String(deepgram_api_key),
     );
     store.set(
         "transcription_profile",
@@ -144,6 +202,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .setup(|app| {
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                commands::diarize::configure_bundled_modern_cpu_backend(&resource_dir);
+            }
             let app_data_dir = app
                 .path()
                 .app_data_dir()
@@ -191,6 +252,8 @@ pub fn run() {
             commands::db::update_processing_chunk_result,
             commands::db::update_processing_chunk_facts,
             commands::db::save_transcription,
+            commands::db::get_transcription_by_meeting,
+            commands::db::save_speaker_map,
             commands::db::save_minutes,
             commands::db::get_minutes_by_meeting,
             commands::db::delete_meeting,
@@ -198,6 +261,9 @@ pub fn run() {
             commands::storage::save_pdf,
             commands::storage::save_benchmark_run,
             commands::storage::open_folder,
+            commands::keyring::get_api_secret,
+            commands::keyring::set_api_secret,
+            commands::keyring::list_api_secret_status,
             get_api_keys,
             set_api_keys,
         ])

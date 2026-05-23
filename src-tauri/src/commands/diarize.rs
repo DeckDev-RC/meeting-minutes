@@ -351,6 +351,80 @@ pub fn modern_cpu_backend_paths(project_root: &Path) -> ModernCpuBackendPaths {
     }
 }
 
+fn modern_cpu_backend_exists(paths: &ModernCpuBackendPaths) -> bool {
+    paths.python_exe.exists() && paths.script_path.exists()
+}
+
+fn explicit_modern_cpu_backend_paths() -> Option<ModernCpuBackendPaths> {
+    let python_exe = std::env::var_os("MEETING_MINUTES_DIARIZE_PYTHON").map(PathBuf::from);
+    let script_path = std::env::var_os("MEETING_MINUTES_DIARIZE_SCRIPT").map(PathBuf::from);
+    match (python_exe, script_path) {
+        (Some(python_exe), Some(script_path)) => {
+            let paths = ModernCpuBackendPaths {
+                python_exe,
+                script_path,
+            };
+            modern_cpu_backend_exists(&paths).then_some(paths)
+        }
+        _ => None,
+    }
+}
+
+fn modern_cpu_backend_roots_from_env() -> Vec<PathBuf> {
+    std::env::var_os("MEETING_MINUTES_DIARIZE_ROOT")
+        .map(PathBuf::from)
+        .into_iter()
+        .collect()
+}
+
+fn modern_cpu_backend_runtime_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        roots.push(
+            PathBuf::from(appdata)
+                .join("com.agregar.meeting-minutes")
+                .join("runtime")
+                .join("diarize"),
+        );
+    }
+
+    if let Some(localappdata) = std::env::var_os("LOCALAPPDATA") {
+        let localappdata = PathBuf::from(localappdata);
+        roots.push(
+            localappdata
+                .join("com.agregar.meeting-minutes")
+                .join("runtime")
+                .join("diarize"),
+        );
+        roots.push(
+            localappdata
+                .join("Meeting Minutes AI")
+                .join("runtime")
+                .join("diarize"),
+        );
+    }
+
+    roots
+}
+
+pub fn bundled_modern_cpu_backend_root(resource_dir: &Path) -> Option<PathBuf> {
+    let candidates = [resource_dir.join("diarize"), resource_dir.to_path_buf()];
+    candidates
+        .into_iter()
+        .find(|root| modern_cpu_backend_exists(&modern_cpu_backend_paths(root)))
+}
+
+pub fn configure_bundled_modern_cpu_backend(resource_dir: &Path) {
+    if std::env::var_os("MEETING_MINUTES_DIARIZE_ROOT").is_some() {
+        return;
+    }
+
+    if let Some(root) = bundled_modern_cpu_backend_root(resource_dir) {
+        std::env::set_var("MEETING_MINUTES_DIARIZE_ROOT", root);
+    }
+}
+
 pub fn pyannote_backend_paths(project_root: &Path) -> PyannoteBackendPaths {
     PyannoteBackendPaths {
         python_exe: project_root
@@ -366,8 +440,40 @@ pub fn pyannote_backend_paths(project_root: &Path) -> PyannoteBackendPaths {
 pub fn resolve_modern_cpu_backend_from_dir(start_dir: &Path) -> Option<ModernCpuBackendPaths> {
     for dir in start_dir.ancestors() {
         let paths = modern_cpu_backend_paths(dir);
-        if paths.python_exe.exists() && paths.script_path.exists() {
+        if modern_cpu_backend_exists(&paths) {
             return Some(paths);
+        }
+    }
+
+    None
+}
+
+pub fn resolve_modern_cpu_backend() -> Option<ModernCpuBackendPaths> {
+    if let Some(paths) = explicit_modern_cpu_backend_paths() {
+        return Some(paths);
+    }
+
+    for root in modern_cpu_backend_roots_from_env()
+        .into_iter()
+        .chain(modern_cpu_backend_runtime_roots())
+    {
+        let paths = modern_cpu_backend_paths(&root);
+        if modern_cpu_backend_exists(&paths) {
+            return Some(paths);
+        }
+    }
+
+    if let Ok(current_dir) = std::env::current_dir() {
+        if let Some(paths) = resolve_modern_cpu_backend_from_dir(&current_dir) {
+            return Some(paths);
+        }
+    }
+
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(exe_dir) = current_exe.parent() {
+            if let Some(paths) = resolve_modern_cpu_backend_from_dir(exe_dir) {
+                return Some(paths);
+            }
         }
     }
 
@@ -853,9 +959,7 @@ async fn run_modern_cpu_backend(
     audio_path: String,
     expected_speakers: Option<i32>,
 ) -> Result<DiarizedResult, String> {
-    let current_dir =
-        std::env::current_dir().map_err(|e| format!("Failed to resolve current directory: {e}"))?;
-    let backend = resolve_modern_cpu_backend_from_dir(&current_dir)
+    let backend = resolve_modern_cpu_backend()
         .ok_or_else(|| "Modern CPU diarization backend is not installed".to_string())?;
     let output_dir = std::env::temp_dir().join(format!(
         "meeting-minutes-diarize-cpu-{}",
@@ -941,9 +1045,7 @@ async fn run_modern_cpu_backend_batch(
     expected_speakers: Option<i32>,
     max_parallel_chunks: usize,
 ) -> Result<DiarizedResult, String> {
-    let current_dir =
-        std::env::current_dir().map_err(|e| format!("Failed to resolve current directory: {e}"))?;
-    let backend = resolve_modern_cpu_backend_from_dir(&current_dir)
+    let backend = resolve_modern_cpu_backend()
         .ok_or_else(|| "Modern CPU diarization backend is not installed".to_string())?;
     let output_dir = std::env::temp_dir().join(format!(
         "meeting-minutes-diarize-cpu-batch-{}",
