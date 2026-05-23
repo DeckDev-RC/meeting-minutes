@@ -149,6 +149,11 @@ export type DiarizationMode =
   | 'precise'
   | 'pyannote';
 
+export type SpeakerDiarizationRuntime =
+  | 'modern-cpu'
+  | 'sherpa-onnx-cpu'
+  | 'sherpa-onnx-cuda';
+
 export interface DiarizationOptions {
   audioChunks?: ExportedChunk[];
   mode?: DiarizationMode;

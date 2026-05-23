@@ -182,6 +182,19 @@ export const diarizeAudioTurnsModernCpuChunked = (
     numThreads,
   });
 
+export const diarizeAudioTurnsSherpaChunked = (
+  audioChunks: ExportedChunk[],
+  expectedSpeakers?: number,
+  numThreads?: number,
+  provider?: 'cpu' | 'cuda' | 'coreml'
+) =>
+  invoke<SpeakerTurn[]>('diarize_audio_turns_sherpa_chunked', {
+    audioChunks,
+    expectedSpeakers,
+    numThreads,
+    provider,
+  });
+
 export const diarizeAudioTurnsPyannote = (
   audioPath: string,
   expectedSpeakers?: number
@@ -328,6 +341,7 @@ export const getApiKeys = () =>
     deepgramApiKey: string;
     transcriptionProfile?: import('./types').TranscriptionRoutingProfile;
     manualTranscriptionProvider?: import('./transcriptionProvider').TranscriptionBackend;
+    speakerDiarizationRuntime?: import('./types').SpeakerDiarizationRuntime;
     expectedSpeakers?: number;
   }>('get_api_keys');
 
@@ -339,6 +353,7 @@ export const setApiKeys = (
   deepgramApiKey: string,
   transcriptionProfile?: import('./types').TranscriptionRoutingProfile,
   manualTranscriptionProvider?: import('./transcriptionProvider').TranscriptionBackend,
+  speakerDiarizationRuntime?: import('./types').SpeakerDiarizationRuntime,
   expectedSpeakers?: number
 ) =>
   invoke<void>('set_api_keys', {
@@ -349,5 +364,6 @@ export const setApiKeys = (
     deepgramApiKey,
     transcriptionProfile,
     manualTranscriptionProvider,
+    speakerDiarizationRuntime,
     expectedSpeakers,
   });

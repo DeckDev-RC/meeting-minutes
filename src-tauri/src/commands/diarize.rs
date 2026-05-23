@@ -2,12 +2,7 @@ use crate::models::audio::ExportedChunk;
 use crate::models::transcription::{DiarizedResult, DiarizedSegment, TranscriptionSegment};
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
-use sherpa_onnx::{
-    FastClusteringConfig, OfflineSpeakerDiarization, OfflineSpeakerDiarizationConfig,
-    OfflineSpeakerSegmentationModelConfig, OfflineSpeakerSegmentationPyannoteModelConfig,
-    SpeakerEmbeddingExtractorConfig, Wave,
-};
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -15,18 +10,22 @@ use std::time::Instant;
 use tauri::{command, Manager};
 use tauri_plugin_shell::ShellExt;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 mod refinement;
+pub(crate) mod sherpa;
 mod stitching;
 
 use refinement::chunks_can_use_sherpa;
 pub use refinement::{
     merge_selective_refinement, select_suspicious_chunks_for_refinement,
     select_suspicious_refinement_windows, select_suspicious_refinement_windows_with_context,
+};
+pub use sherpa::{
+    diarize_audio_by_chunks_with_sherpa, diarize_audio_turns_sherpa_chunked,
+    diarize_audio_with_sherpa,
 };
 #[cfg(test)]
 use stitching::global_centroid_speaker_map;
@@ -51,6 +50,8 @@ fn hide_command_window(command: &mut Command) {
 
 const QUICK_MERGE_GAP_SEC: f64 = 1.25;
 const QUICK_ANSWER_WINDOW_SEC: f64 = 4.0;
+const DEFAULT_CHUNKED_MAX_SPEAKERS: i32 = 8;
+const MAX_CONFIGURED_CHUNKED_SPEAKERS: i32 = 12;
 const SEGMENTATION_MODEL_URL: &str = "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.int8.onnx";
 const EMBEDDING_MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
 
@@ -285,6 +286,43 @@ pub fn normalize_diarization_threads(requested: Option<i32>, available_threads: 
         Some(_) => 2,
         None => available.min(8),
     }
+}
+
+fn chunked_max_speakers(expected_speakers: Option<i32>) -> i32 {
+    expected_speakers
+        .filter(|value| *value > 0)
+        .map(|value| value.clamp(1, MAX_CONFIGURED_CHUNKED_SPEAKERS))
+        .unwrap_or(DEFAULT_CHUNKED_MAX_SPEAKERS)
+}
+
+fn normalize_sherpa_provider(value: Option<&str>) -> Option<String> {
+    let normalized = value?.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "cpu" | "cuda" | "coreml" => Some(normalized),
+        "auto" | "" => None,
+        _ => None,
+    }
+}
+
+fn requested_sherpa_provider(provider: Option<String>) -> Option<String> {
+    normalize_sherpa_provider(provider.as_deref()).or_else(|| {
+        normalize_sherpa_provider(
+            std::env::var("MEETING_MINUTES_SHERPA_PROVIDER")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
+fn sherpa_provider_candidates(provider: Option<String>) -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Some(provider) = provider {
+        candidates.push(provider);
+    }
+    if !candidates.iter().any(|candidate| candidate == "cpu") {
+        candidates.push("cpu".to_string());
+    }
+    candidates
 }
 
 fn available_parallelism_count() -> usize {
@@ -931,11 +969,9 @@ async fn run_modern_cpu_backend_batch(
             .arg("--max-workers")
             .arg(max_parallel_chunks.max(1).to_string());
 
-        if let Some(expected_speakers) = expected_speakers.filter(|value| *value > 0) {
-            command
-                .arg("--num-speakers")
-                .arg(expected_speakers.to_string());
-        }
+        command
+            .arg("--max-speakers")
+            .arg(chunked_max_speakers(expected_speakers).to_string());
 
         let output = command
             .output()
@@ -1336,102 +1372,6 @@ pub fn diarize_transcription_locally(segments: &[TranscriptionSegment]) -> Diari
     }
 }
 
-pub async fn diarize_audio_by_chunks_with_sherpa(
-    audio_chunks: Vec<ExportedChunk>,
-    segments: Arc<Vec<TranscriptionSegment>>,
-    assets: DiarizationAssetPaths,
-    expected_speakers: Option<i32>,
-    num_threads: i32,
-) -> Result<DiarizedResult, String> {
-    if audio_chunks.is_empty() {
-        return Ok(diarize_transcription_locally(segments.as_slice()));
-    }
-
-    let mut sorted_chunks = audio_chunks;
-    sorted_chunks.sort_by(|a, b| {
-        a.start_sec
-            .partial_cmp(&b.start_sec)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.index.cmp(&b.index))
-    });
-
-    let available_threads = available_parallelism_count();
-    let worker_count =
-        ((available_threads as i32 / num_threads.max(1)).max(1) as usize).min(sorted_chunks.len());
-    let queue = Arc::new(Mutex::new(VecDeque::from(sorted_chunks)));
-    let mut handles = Vec::new();
-
-    for _ in 0..worker_count {
-        let queue = queue.clone();
-        let segments = segments.clone();
-        let assets = assets.clone();
-        handles.push(tokio::spawn(async move {
-            let mut local_results = Vec::new();
-
-            loop {
-                let chunk = {
-                    let mut guard = queue.lock().await;
-                    guard.pop_front()
-                };
-                let Some(chunk) = chunk else {
-                    break;
-                };
-
-                let chunk_segments = segments_for_chunk(&segments, &chunk);
-                if chunk_segments.is_empty() {
-                    continue;
-                }
-
-                let chunk_path = chunk.audio_path.clone();
-                let chunk_assets = assets.clone();
-                let chunk_segments_for_sherpa = chunk_segments.clone();
-                let diarized = tokio::task::spawn_blocking(move || {
-                    diarize_audio_with_sherpa(
-                        chunk_path,
-                        &chunk_segments_for_sherpa,
-                        chunk_assets,
-                        expected_speakers,
-                        num_threads,
-                    )
-                })
-                .await
-                .map_err(|e| format!("Hybrid diarization worker failed: {e}"))?
-                .map_err(|e| {
-                    format!(
-                        "Hybrid Sherpa diarization failed for chunk {}: {e}",
-                        chunk.index
-                    )
-                })?;
-
-                local_results.push((
-                    chunk.index,
-                    shift_diarized_result(diarized, chunk.offset_sec),
-                ));
-            }
-
-            Ok::<Vec<(usize, DiarizedResult)>, String>(local_results)
-        }));
-    }
-
-    let mut chunk_results = Vec::new();
-    for handle in handles {
-        chunk_results.extend(
-            handle
-                .await
-                .map_err(|e| format!("Hybrid diarization join failed: {e}"))??,
-        );
-    }
-
-    chunk_results.sort_by_key(|(index, _)| *index);
-    Ok(stitch_diarized_chunk_results(
-        chunk_results
-            .into_iter()
-            .map(|(_, result)| result)
-            .collect(),
-        3.0,
-    ))
-}
-
 pub async fn diarize_with_mode_report(
     audio_path: String,
     segments: Vec<TranscriptionSegment>,
@@ -1697,70 +1637,6 @@ pub fn diarize_transcription_fast(segments_json: String) -> Result<DiarizedResul
     let segments = serde_json::from_str::<Vec<TranscriptionSegment>>(&segments_json)
         .map_err(|e| format!("Failed to parse transcription segments JSON: {e}"))?;
     Ok(diarize_transcription_locally(&segments))
-}
-
-pub fn diarize_audio_with_sherpa(
-    audio_path: String,
-    segments: &[TranscriptionSegment],
-    assets: DiarizationAssetPaths,
-    expected_speakers: Option<i32>,
-    num_threads: i32,
-) -> Result<DiarizedResult, String> {
-    let num_clusters = expected_speakers.filter(|value| *value > 0).unwrap_or(-1);
-    let num_threads = num_threads.max(1);
-    let config = OfflineSpeakerDiarizationConfig {
-        segmentation: OfflineSpeakerSegmentationModelConfig {
-            pyannote: OfflineSpeakerSegmentationPyannoteModelConfig {
-                model: Some(assets.segmentation_model.to_string_lossy().to_string()),
-            },
-            provider: Some("cpu".to_string()),
-            num_threads,
-            ..Default::default()
-        },
-        embedding: SpeakerEmbeddingExtractorConfig {
-            model: Some(assets.embedding_model.to_string_lossy().to_string()),
-            provider: Some("cpu".to_string()),
-            num_threads,
-            ..Default::default()
-        },
-        clustering: FastClusteringConfig {
-            num_clusters,
-            threshold: 0.5,
-        },
-        min_duration_on: 0.3,
-        min_duration_off: 0.5,
-    };
-
-    let diarizer = OfflineSpeakerDiarization::create(&config)
-        .ok_or_else(|| "Failed to initialize offline speaker diarization".to_string())?;
-    let wave = Wave::read(&audio_path).ok_or_else(|| "Failed to read WAV audio".to_string())?;
-
-    if diarizer.sample_rate() != wave.sample_rate() {
-        return Err(format!(
-            "Unexpected diarization sample rate. Model expects {} Hz, audio has {} Hz",
-            diarizer.sample_rate(),
-            wave.sample_rate()
-        ));
-    }
-
-    let result = diarizer
-        .process(wave.samples())
-        .ok_or_else(|| "Offline speaker diarization failed".to_string())?;
-    let turns = result
-        .sort_by_start_time()
-        .into_iter()
-        .map(|segment| SpeakerTurn {
-            start: segment.start as f64,
-            end: segment.end as f64,
-            speaker_index: segment.speaker,
-        })
-        .collect::<Vec<_>>();
-
-    if turns.is_empty() {
-        return Err("Offline speaker diarization returned no speaker turns".to_string());
-    }
-
-    Ok(diarize_segments_with_speaker_turns(&segments, &turns))
 }
 
 #[command]

@@ -29,6 +29,14 @@ fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
         .build()
 }
 
+fn normalize_speaker_diarization_runtime(value: Option<String>) -> String {
+    match value.as_deref() {
+        Some("sherpa-onnx-cpu") => "sherpa-onnx-cpu".to_string(),
+        Some("sherpa-onnx-cuda") => "sherpa-onnx-cuda".to_string(),
+        _ => "modern-cpu".to_string(),
+    }
+}
+
 #[tauri::command]
 fn get_api_keys(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     let store = app.store("config.json").map_err(|e| e.to_string())?;
@@ -47,6 +55,11 @@ fn get_api_keys(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
         .get("manual_transcription_provider")
         .and_then(|v| v.as_str().map(|s| s.to_string()))
         .unwrap_or_else(|| "groq".to_string());
+    let speaker_diarization_runtime = normalize_speaker_diarization_runtime(
+        store
+            .get("speaker_diarization_runtime")
+            .and_then(|v| v.as_str().map(|s| s.to_string())),
+    );
     let expected_speakers = store
         .get("expected_speakers")
         .and_then(|v| v.as_i64())
@@ -60,6 +73,7 @@ fn get_api_keys(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
         "deepgramApiKey": deepgram_api_key,
         "transcriptionProfile": transcription_profile,
         "manualTranscriptionProvider": manual_transcription_provider,
+        "speakerDiarizationRuntime": speaker_diarization_runtime,
         "expectedSpeakers": expected_speakers
     }))
 }
@@ -74,6 +88,7 @@ fn set_api_keys(
     deepgram_api_key: String,
     transcription_profile: Option<String>,
     manual_transcription_provider: Option<String>,
+    speaker_diarization_runtime: Option<String>,
     expected_speakers: Option<i32>,
 ) -> Result<(), String> {
     let store = app.store("config.json").map_err(|e| e.to_string())?;
@@ -102,6 +117,12 @@ fn set_api_keys(
         serde_json::Value::String(
             manual_transcription_provider.unwrap_or_else(|| "groq".to_string()),
         ),
+    );
+    store.set(
+        "speaker_diarization_runtime",
+        serde_json::Value::String(normalize_speaker_diarization_runtime(
+            speaker_diarization_runtime,
+        )),
     );
     if let Some(expected_speakers) = expected_speakers.filter(|value| *value > 0) {
         store.set(
@@ -152,6 +173,7 @@ pub fn run() {
             commands::diarize::diarize_audio_turns_modern_cpu,
             commands::diarize::diarize_audio_turns_modern_cpu_chunked,
             commands::diarize::diarize_audio_turns_pyannote,
+            commands::diarize::sherpa::diarize_audio_turns_sherpa_chunked,
             commands::diarize::diarize_transcription_end_to_end,
             commands::diarize::diarize_transcription_fast,
             commands::diarize::diarize_transcription,

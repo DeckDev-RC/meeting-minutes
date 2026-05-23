@@ -527,6 +527,14 @@ fn diarization_thread_count_is_bounded() {
 }
 
 #[test]
+fn chunked_diarization_caps_speaker_search_without_forcing_exact_count() {
+    assert_eq!(chunked_max_speakers(None), 8);
+    assert_eq!(chunked_max_speakers(Some(0)), 8);
+    assert_eq!(chunked_max_speakers(Some(4)), 4);
+    assert_eq!(chunked_max_speakers(Some(20)), 12);
+}
+
+#[test]
 fn explicit_diarization_modes_do_not_allow_local_fallback() {
     assert!(mode_allows_local_fallback(DiarizationMode::Auto));
     assert!(!mode_allows_local_fallback(DiarizationMode::Fast));
@@ -908,4 +916,35 @@ fn hybrid_sherpa_requires_wav_chunks() {
     assert!(chunks_can_use_sherpa(&[wav_chunk]));
     assert!(!chunks_can_use_sherpa(&[flac_chunk]));
     assert!(!chunks_can_use_sherpa(&[]));
+}
+
+#[test]
+fn sherpa_provider_normalization_accepts_accelerated_backends() {
+    assert_eq!(
+        normalize_sherpa_provider(Some(" CUDA ")),
+        Some("cuda".to_string())
+    );
+    assert_eq!(
+        normalize_sherpa_provider(Some("CoreML")),
+        Some("coreml".to_string())
+    );
+    assert_eq!(
+        normalize_sherpa_provider(Some("cpu")),
+        Some("cpu".to_string())
+    );
+    assert_eq!(normalize_sherpa_provider(Some("auto")), None);
+    assert_eq!(normalize_sherpa_provider(Some("directml")), None);
+}
+
+#[test]
+fn sherpa_provider_candidates_fall_back_to_cpu_once() {
+    assert_eq!(
+        sherpa_provider_candidates(Some("cuda".to_string())),
+        vec!["cuda".to_string(), "cpu".to_string()]
+    );
+    assert_eq!(
+        sherpa_provider_candidates(Some("cpu".to_string())),
+        vec!["cpu".to_string()]
+    );
+    assert_eq!(sherpa_provider_candidates(None), vec!["cpu".to_string()]);
 }

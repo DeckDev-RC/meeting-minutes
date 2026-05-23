@@ -87,6 +87,7 @@ export default function Settings() {
       deepgramApiKey,
       transcriptionProfile,
       manualTranscriptionProvider,
+      undefined,
       speakerCount,
     );
     setSaved(true);

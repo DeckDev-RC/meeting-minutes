@@ -8,6 +8,7 @@ import {
   diarizeAudioTurnsModernCpu,
   diarizeAudioTurnsModernCpuChunked,
   diarizeAudioTurnsPyannote,
+  diarizeAudioTurnsSherpaChunked,
   diarizeTranscriptionEndToEnd,
   extractFactBatch,
   extractChunkFacts,
@@ -58,6 +59,12 @@ import {
   resolveDiarizationExpectedSpeakers,
 } from "../lib/speakerCount";
 import {
+  chunkOutputFormatForSpeakerRuntime,
+  normalizeSpeakerDiarizationRuntime,
+  sherpaProviderForRuntime,
+  shouldTrySherpaRuntime,
+} from "../lib/diarizationRuntime";
+import {
   applyLiveTranscriptSpeakers,
   appendLiveInsights,
   appendLiveLog,
@@ -80,6 +87,7 @@ import type {
   ProcessingProfile,
   ProcessingChunkRecord,
   SpeakerTurn,
+  SpeakerDiarizationRuntime,
   TranscriptionSegment,
 } from "../lib/types";
 
@@ -315,7 +323,7 @@ const parseCachedFacts = (chunk: ProcessingChunkRecord): MeetingChunkInsights | 
 type SpeculativeSpeakerTurns = {
   turns: SpeakerTurn[];
   error: string;
-  engine: "pyannote" | "modern-cpu" | "modern-cpu-chunked" | "none";
+  engine: "pyannote" | "modern-cpu" | "modern-cpu-chunked" | "sherpa-onnx" | "none";
   fallbackReason?: string;
 };
 
@@ -343,8 +351,25 @@ const startSpeculativeSpeakerTurns = (
   audioChunks: ExportedChunk[] = [],
   preferChunked = false,
   preferPyannote = false,
+  speakerRuntime: SpeakerDiarizationRuntime = "modern-cpu",
 ): Promise<SpeculativeSpeakerTurns> => {
-  if (preferChunked && audioChunks.length > 1) {
+  const runModernCpu = (fallbackReason?: string): Promise<SpeculativeSpeakerTurns> => {
+    if (!preferChunked || audioChunks.length <= 1) {
+      return diarizeAudioTurnsModernCpu(audioPath, expectedSpeakers)
+        .then((turns) => ({
+          turns,
+          error: "",
+          engine: "modern-cpu" as const,
+          fallbackReason,
+        }))
+        .catch((err) => ({
+          turns: [],
+          engine: "none" as const,
+          error: formatError(err) || "Diarizacao local indisponivel.",
+          fallbackReason,
+        }));
+    }
+
     const logicalCores =
       typeof navigator === "undefined" ? 8 : navigator.hardwareConcurrency || 8;
     const recommendedWorkers = Math.min(
@@ -353,21 +378,48 @@ const startSpeculativeSpeakerTurns = (
     );
     const workerCount = Math.min(recommendedWorkers, audioChunks.length);
     return diarizeAudioTurnsModernCpuChunked(audioChunks, expectedSpeakers, workerCount)
-      .then((turns) => ({ turns, error: "", engine: "modern-cpu-chunked" as const }))
+      .then((turns) => ({
+        turns,
+        error: "",
+        engine: "modern-cpu-chunked" as const,
+        fallbackReason,
+      }))
       .catch((chunkedErr) =>
         diarizeAudioTurnsModernCpu(audioPath, expectedSpeakers)
           .then((turns) => ({
             turns,
             error: "",
             engine: "modern-cpu" as const,
-            fallbackReason: summarizeBackendError(formatError(chunkedErr)),
+            fallbackReason:
+              fallbackReason || summarizeBackendError(formatError(chunkedErr)),
           }))
           .catch((err) => ({
             turns: [],
             engine: "none" as const,
             error: formatError(err) || "Diarizacao local indisponivel.",
-            fallbackReason: summarizeBackendError(formatError(chunkedErr)),
+            fallbackReason:
+              fallbackReason || summarizeBackendError(formatError(chunkedErr)),
           })),
+      );
+  };
+
+  if (shouldTrySherpaRuntime(speakerRuntime, audioChunks.length)) {
+    const logicalCores =
+      typeof navigator === "undefined" ? 8 : navigator.hardwareConcurrency || 8;
+    const recommendedWorkers = Math.min(
+      MAX_CHUNKED_DIARIZATION_WORKERS,
+      Math.max(2, Math.floor(logicalCores / 3)),
+    );
+    const workerCount = Math.min(recommendedWorkers, audioChunks.length);
+    return diarizeAudioTurnsSherpaChunked(
+      audioChunks,
+      expectedSpeakers,
+      workerCount,
+      sherpaProviderForRuntime(speakerRuntime),
+    )
+      .then((turns) => ({ turns, error: "", engine: "sherpa-onnx" as const }))
+      .catch((sherpaErr) =>
+        runModernCpu(summarizeBackendError(formatError(sherpaErr))),
       );
   }
 
@@ -391,13 +443,7 @@ const startSpeculativeSpeakerTurns = (
       );
   }
 
-  return diarizeAudioTurnsModernCpu(audioPath, expectedSpeakers)
-    .then((turns) => ({ turns, error: "", engine: "modern-cpu" as const }))
-    .catch((err) => ({
-      turns: [],
-      engine: "none" as const,
-      error: formatError(err) || "Diarizacao local indisponivel.",
-    }));
+  return runModernCpu();
 };
 
 const PROFILE_LABELS: Record<ProcessingProfile, string> = {
@@ -757,6 +803,9 @@ export default function Processing() {
       const processingProfile = normalizeProcessingProfile(meeting.processingProfile);
       const meetingTranscriptionProfile =
         meeting.transcriptionProfile ?? keys.transcriptionProfile ?? "smart-low-cost";
+      const speakerDiarizationRuntime = normalizeSpeakerDiarizationRuntime(
+        keys.speakerDiarizationRuntime,
+      );
       const participantNames = parseParticipantsHint(meeting.participantsHint);
       const diarizationExpectedSpeakers = resolveDiarizationExpectedSpeakers(
         keys.expectedSpeakers,
@@ -782,6 +831,13 @@ export default function Processing() {
       setRunProfile(processingProfile);
       setProcessingNote(speakerProcessingNote);
       addLiveLog(meetingId, "info", `Perfil ${PROFILE_LABELS[processingProfile]} selecionado.`);
+      addLiveLog(
+        meetingId,
+        "info",
+        speakerDiarizationRuntime === "modern-cpu"
+          ? "Motor de falantes: CPU moderno."
+          : `Motor de falantes: ${speakerDiarizationRuntime}.`,
+      );
       if (inferredExpectedSpeakers) {
         addLiveLog(
           meetingId,
@@ -828,7 +884,7 @@ export default function Processing() {
           overlapSec: chunkOverlapForProfile(processingProfile),
           silenceMinDurationSec: 0.45,
           silenceNoiseDb: -35,
-          outputFormat: "flac",
+          outputFormat: chunkOutputFormatForSpeakerRuntime(speakerDiarizationRuntime),
         });
         durationSec = prepared.durationSec;
         updatePipelineProgress("detect_speech", 0, durationSec, 0, 0);
@@ -1145,6 +1201,7 @@ export default function Processing() {
         exportedChunks,
         diarizationPlan.preferChunked,
         false,
+        speakerDiarizationRuntime,
       ).then((result) => {
         const elapsedSec = (Date.now() - speakerTurnsStartedAt) / 1000;
         addLiveLog(
@@ -1547,7 +1604,13 @@ export default function Processing() {
       const segmentsJson = JSON.stringify(segments);
       const diarizedPromise = (async () => {
         const speculative = await speakerTurnsPromise;
-        if (speculative.engine === "pyannote") {
+        if (speculative.engine === "sherpa-onnx") {
+          setProcessingNote(
+            speakerDiarizationRuntime === "sherpa-onnx-cuda"
+              ? "ONNX/sherpa ativo com tentativa CUDA e fallback automatico."
+              : "ONNX/sherpa CPU ativo para identificar falantes em blocos.",
+          );
+        } else if (speculative.engine === "pyannote") {
           setProcessingNote("Pyannote Community-1 ativo nesta reuniao.");
         } else if (speculative.engine === "modern-cpu-chunked") {
           setProcessingNote(
