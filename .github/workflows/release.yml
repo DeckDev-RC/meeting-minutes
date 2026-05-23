@@ -17,18 +17,18 @@ permissions:
 jobs:
   windows:
     name: Build and publish Windows installers
-    runs-on: windows-latest
+    runs-on: windows-2025
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           lfs: true
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -65,5 +65,3 @@ jobs:
           tauriScript: npm run tauri
           retryAttempts: 1
           uploadPlainBinary: false
-          uploadWorkflowArtifacts: true
-          workflowArtifactNamePattern: "[platform]-[arch]-[bundle]"
