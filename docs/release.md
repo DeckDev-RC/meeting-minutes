@@ -36,8 +36,8 @@ You can also run the workflow manually from GitHub Actions and provide a
    With the local target dir used by this repo, the generated files are usually:
 
    ```powershell
-   C:\tmp\cargo-target\release\bundle\msi\Meeting Minutes AI_1.0.0_x64_en-US.msi
-   C:\tmp\cargo-target\release\bundle\nsis\Meeting Minutes AI_1.0.0_x64-setup.exe
+   C:\tmp\cargo-target\release\bundle\msi\Meeting Minutes AI_1.0.1_x64_en-US.msi
+   C:\tmp\cargo-target\release\bundle\nsis\Meeting Minutes AI_1.0.1_x64-setup.exe
    ```
 
 ## Alternative: Git LFS
@@ -48,8 +48,8 @@ extensions with Git LFS. The LFS patterns are already declared in
 
 ```powershell
 git lfs install
-git add -f "executaveis/Meeting Minutes AI_1.0.0_x64_en-US.msi"
-git add -f "executaveis/Meeting Minutes AI_1.0.0_x64-setup.exe"
+git add -f "executaveis/Meeting Minutes AI_1.0.1_x64_en-US.msi"
+git add -f "executaveis/Meeting Minutes AI_1.0.1_x64-setup.exe"
 ```
 
 Do not store generated binaries directly in regular Git commits.
