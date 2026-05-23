@@ -1,5 +1,7 @@
 use super::*;
 
+const GLOBAL_CENTROID_MIN_COSINE: f64 = 0.75;
+
 pub fn segments_for_chunk(
     segments: &[TranscriptionSegment],
     chunk: &ExportedChunk,
@@ -72,57 +74,137 @@ fn cosine_similarity(left: &[f64], right: &[f64]) -> Option<f64> {
     )
 }
 
-fn best_centroid_match<'a>(
-    local: &SpeakerCentroid,
-    global_centroids: &'a [GlobalSpeakerCentroid],
-    min_cosine: Option<f64>,
-) -> Option<&'a str> {
-    global_centroids
-        .iter()
-        .filter_map(|global| {
-            cosine_similarity(&local.embedding, &global.embedding)
-                .map(|score| (global.speaker.as_str(), score))
-        })
-        .filter(|(_, score)| min_cosine.map(|min| *score >= min).unwrap_or(true))
-        .max_by(|(_, left), (_, right)| {
-            left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .map(|(speaker, _)| speaker)
-}
-
-fn upsert_global_centroid(
-    global_centroids: &mut Vec<GlobalSpeakerCentroid>,
-    speaker: &str,
-    local_embedding: &[f64],
-) {
-    let Some(local_embedding) = normalized_embedding(local_embedding) else {
-        return;
-    };
-
-    if let Some(global) = global_centroids
-        .iter_mut()
-        .find(|global| global.speaker == speaker)
-    {
-        if global.embedding.len() != local_embedding.len() {
-            return;
-        }
-        let previous_weight = global.observations.max(1) as f64;
-        for (global_value, local_value) in global.embedding.iter_mut().zip(local_embedding) {
-            *global_value =
-                (*global_value * previous_weight + local_value) / (previous_weight + 1.0);
-        }
-        if let Some(normalized) = normalized_embedding(&global.embedding) {
-            global.embedding = normalized;
-        }
-        global.observations += 1;
-        return;
+fn centroid_group_embedding(
+    group: &[usize],
+    observations: &[(usize, String, Vec<f64>)],
+) -> Option<Vec<f64>> {
+    if group.is_empty() {
+        return None;
     }
 
-    global_centroids.push(GlobalSpeakerCentroid {
-        speaker: speaker.to_string(),
-        embedding: local_embedding,
-        observations: 1,
-    });
+    let first = normalized_embedding(&observations[*group.first()?].2)?;
+    let mut centroid = vec![0.0; first.len()];
+    for observation_index in group {
+        let embedding = normalized_embedding(&observations[*observation_index].2)?;
+        if embedding.len() != centroid.len() {
+            return None;
+        }
+        for (target, value) in centroid.iter_mut().zip(embedding) {
+            *target += value;
+        }
+    }
+    normalized_embedding(&centroid)
+}
+
+fn merge_centroid_groups_by_threshold(
+    observations: &[(usize, String, Vec<f64>)],
+    min_cosine: f64,
+) -> Vec<Vec<usize>> {
+    let mut groups: Vec<Vec<usize>> = (0..observations.len()).map(|index| vec![index]).collect();
+    let mut changed = true;
+
+    while changed {
+        changed = false;
+        'outer: for left in 0..groups.len() {
+            let Some(left_embedding) = centroid_group_embedding(&groups[left], observations) else {
+                continue;
+            };
+            for right in (left + 1)..groups.len() {
+                let Some(right_embedding) = centroid_group_embedding(&groups[right], observations)
+                else {
+                    continue;
+                };
+                let Some(score) = cosine_similarity(&left_embedding, &right_embedding) else {
+                    continue;
+                };
+                if score >= min_cosine {
+                    let merged = groups.remove(right);
+                    groups[left].extend(merged);
+                    changed = true;
+                    break 'outer;
+                }
+            }
+        }
+    }
+
+    groups
+}
+
+fn cap_centroid_groups(
+    mut groups: Vec<Vec<usize>>,
+    observations: &[(usize, String, Vec<f64>)],
+    expected_speakers: Option<usize>,
+) -> Vec<Vec<usize>> {
+    let Some(expected_speakers) = expected_speakers.filter(|value| *value > 0) else {
+        return groups;
+    };
+
+    while groups.len() > expected_speakers {
+        let mut best_pair = None;
+        let mut best_score = f64::NEG_INFINITY;
+
+        for left in 0..groups.len() {
+            let Some(left_embedding) = centroid_group_embedding(&groups[left], observations) else {
+                continue;
+            };
+            for right in (left + 1)..groups.len() {
+                let Some(right_embedding) = centroid_group_embedding(&groups[right], observations)
+                else {
+                    continue;
+                };
+                let Some(score) = cosine_similarity(&left_embedding, &right_embedding) else {
+                    continue;
+                };
+                if score > best_score {
+                    best_pair = Some((left, right));
+                    best_score = score;
+                }
+            }
+        }
+
+        let Some((left, right)) = best_pair else {
+            break;
+        };
+        let merged = groups.remove(right);
+        groups[left].extend(merged);
+    }
+
+    groups
+}
+
+pub(super) fn global_centroid_speaker_map(
+    chunk_results: &[DiarizedChunkResult],
+    expected_speakers: Option<usize>,
+) -> HashMap<(usize, String), String> {
+    let mut observations = Vec::new();
+    for (chunk_index, chunk) in chunk_results.iter().enumerate() {
+        for centroid in &chunk.speaker_centroids {
+            if normalized_embedding(&centroid.embedding).is_some() {
+                observations.push((
+                    chunk_index,
+                    centroid.speaker.clone(),
+                    centroid.embedding.clone(),
+                ));
+            }
+        }
+    }
+    if observations.is_empty() {
+        return HashMap::new();
+    }
+
+    let groups = merge_centroid_groups_by_threshold(&observations, GLOBAL_CENTROID_MIN_COSINE);
+    let mut groups = cap_centroid_groups(groups, &observations, expected_speakers);
+    groups.sort_by_key(|group| group.iter().copied().min().unwrap_or(usize::MAX));
+
+    let mut mapping = HashMap::new();
+    for (group_index, group) in groups.iter().enumerate() {
+        let speaker = format!("Falante {}", group_index + 1);
+        for observation_index in group {
+            let (chunk_index, local_speaker, _) = &observations[*observation_index];
+            mapping.insert((*chunk_index, local_speaker.clone()), speaker.clone());
+        }
+    }
+    mapping
 }
 
 fn expected_speaker_name_from_local_label(label: &str, expected_speakers: usize) -> Option<String> {
@@ -268,9 +350,9 @@ pub(super) fn stitch_diarized_chunk_results_with_centroids(
         .map(|value| value as usize);
     let mut speakers = Vec::new();
     let mut segments: Vec<DiarizedSegment> = Vec::new();
-    let mut global_centroids: Vec<GlobalSpeakerCentroid> = Vec::new();
+    let centroid_mapping = global_centroid_speaker_map(&chunk_results, expected_speakers);
 
-    for chunk in chunk_results {
+    for (chunk_index, chunk) in chunk_results.into_iter().enumerate() {
         let has_centroids = !chunk.speaker_centroids.is_empty();
         let mut local_to_global: HashMap<String, String> = HashMap::new();
         let mut overlap_scores: HashMap<String, HashMap<String, f64>> = HashMap::new();
@@ -293,33 +375,23 @@ pub(super) fn stitch_diarized_chunk_results_with_centroids(
             }
         }
 
+        for centroid in &chunk.speaker_centroids {
+            if let Some(global_speaker) =
+                centroid_mapping.get(&(chunk_index, centroid.speaker.clone()))
+            {
+                local_to_global.insert(centroid.speaker.clone(), global_speaker.clone());
+            }
+        }
+
         for (local_speaker, global_scores) in overlap_scores {
+            if local_to_global.contains_key(&local_speaker) {
+                continue;
+            }
             if let Some((global_speaker, _)) = global_scores
                 .into_iter()
                 .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             {
                 local_to_global.insert(local_speaker, global_speaker);
-            }
-        }
-
-        for centroid in &chunk.speaker_centroids {
-            if local_to_global.contains_key(&centroid.speaker) {
-                continue;
-            }
-
-            let speaker_cap_reached = expected_speakers
-                .map(|expected| speakers.len() >= expected)
-                .unwrap_or(false);
-            let min_cosine = if speaker_cap_reached {
-                None
-            } else {
-                Some(0.72)
-            };
-
-            if let Some(global_speaker) =
-                best_centroid_match(centroid, &global_centroids, min_cosine)
-            {
-                local_to_global.insert(centroid.speaker.clone(), global_speaker.to_string());
             }
         }
 
@@ -360,12 +432,6 @@ pub(super) fn stitch_diarized_chunk_results_with_centroids(
             }
 
             segments.push(segment);
-        }
-
-        for centroid in &chunk.speaker_centroids {
-            if let Some(global_speaker) = local_to_global.get(&centroid.speaker) {
-                upsert_global_centroid(&mut global_centroids, global_speaker, &centroid.embedding);
-            }
         }
     }
 

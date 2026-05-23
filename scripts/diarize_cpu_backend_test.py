@@ -9,6 +9,8 @@ from diarize_cpu_backend import (
     build_payload,
     compact_report,
     dependency_warnings,
+    build_embedding_windows,
+    embedding_profile_config,
     run_backend_batch_with_diarize,
 )
 
@@ -189,6 +191,44 @@ def test_payload_includes_speaker_centroids_when_available():
     ]
 
 
+def test_balanced_embedding_profile_uses_fewer_windows_for_long_speech():
+    segment = SimpleNamespace(start=0.0, end=30.0, duration=30.0)
+
+    quality = build_embedding_windows(segment, embedding_profile_config("quality"))
+    balanced = build_embedding_windows(segment, embedding_profile_config("balanced"))
+
+    assert len(balanced) < len(quality) * 0.75
+    assert balanced[0] == (0.0, 1.2)
+    assert balanced[-1][1] == 30.0
+
+
+def test_short_speech_keeps_single_embedding_window():
+    segment = SimpleNamespace(start=10.0, end=11.0, duration=1.0)
+
+    windows = build_embedding_windows(segment, embedding_profile_config("balanced"))
+
+    assert windows == [(10.0, 11.0)]
+
+
+def test_payload_includes_diarization_profile_when_available():
+    result = SimpleNamespace(
+        audio_duration=12.5,
+        segments=[],
+        speaker_centroids={},
+        profile={
+            "embeddingProfile": "balanced",
+            "embeddingCount": 42,
+            "timings": {"vadSec": 1.0, "embeddingSec": 2.0},
+        },
+    )
+
+    payload = build_payload(result, "diarize", "diarize-0.1.2", "meeting.wav", 3.5)
+
+    assert payload["profile"]["embeddingProfile"] == "balanced"
+    assert payload["profile"]["embeddingCount"] == 42
+    assert payload["profile"]["timings"]["embeddingSec"] == 2.0
+
+
 def test_reusable_engine_constructs_speaker_once():
     calls = []
 
@@ -217,6 +257,9 @@ if __name__ == "__main__":
     test_run_backend_batch_parallelizes_shared_diarize_function()
     test_compact_report_supports_batch_reports()
     test_payload_includes_speaker_centroids_when_available()
+    test_balanced_embedding_profile_uses_fewer_windows_for_long_speech()
+    test_short_speech_keeps_single_embedding_window()
+    test_payload_includes_diarization_profile_when_available()
     test_reusable_engine_constructs_speaker_once()
     test_dependency_warnings_flag_torchaudio_29()
     print("ok")

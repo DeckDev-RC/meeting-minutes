@@ -2,10 +2,16 @@ import json
 import argparse
 import concurrent.futures
 import importlib.metadata
+import os
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+
+DEFAULT_EMBEDDING_WINDOW_SEC = 1.2
+DEFAULT_EMBEDDING_STEP_SEC = 0.6
+DEFAULT_MIN_SEGMENT_DURATION_SEC = 0.4
 
 
 def normalize_speaker_name(value):
@@ -82,10 +88,89 @@ def build_payload(result, backend, model, audio_path, wall_clock_sec):
     speaker_centroids = speaker_centroids_to_list(getattr(result, "speaker_centroids", None))
     if speaker_centroids:
         payload["speakerCentroids"] = speaker_centroids
+    profile = getattr(result, "profile", None)
+    if profile:
+        payload["profile"] = profile
     return payload
 
 
-def backend_kwargs(num_speakers=None, min_speakers=None, max_speakers=None):
+@dataclass(frozen=True)
+class EmbeddingProfile:
+    name: str
+    window_sec: float = DEFAULT_EMBEDDING_WINDOW_SEC
+    base_step_sec: float = DEFAULT_EMBEDDING_STEP_SEC
+    long_step_sec: float = DEFAULT_EMBEDDING_STEP_SEC
+    long_segment_threshold_sec: float = 12.0
+    boundary_refinement: bool = False
+    min_segment_duration_sec: float = DEFAULT_MIN_SEGMENT_DURATION_SEC
+
+    def step_for_duration(self, duration_sec):
+        if duration_sec >= self.long_segment_threshold_sec:
+            return self.long_step_sec
+        return self.base_step_sec
+
+
+def embedding_profile_config(value=None):
+    raw = (
+        value
+        or os.environ.get("MEETING_MINUTES_DIARIZE_EMBEDDING_PROFILE")
+        or "balanced"
+    )
+    name = str(raw).strip().lower()
+    if name in {"quality", "precise", "dense"}:
+        return EmbeddingProfile(name="quality", boundary_refinement=False)
+    if name in {"fast", "coarse"}:
+        return EmbeddingProfile(
+            name="fast",
+            long_step_sec=1.5,
+            long_segment_threshold_sec=2.0,
+            boundary_refinement=False,
+        )
+    if name in {"boundary", "balanced-boundary"}:
+        return EmbeddingProfile(
+            name="boundary",
+            long_step_sec=1.2,
+            long_segment_threshold_sec=2.0,
+            boundary_refinement=True,
+        )
+    return EmbeddingProfile(
+        name="balanced",
+        long_step_sec=1.2,
+        long_segment_threshold_sec=2.0,
+        boundary_refinement=False,
+    )
+
+
+def segment_duration(segment):
+    duration = getattr(segment, "duration", None)
+    if duration is not None:
+        return float(duration)
+    return max(0.0, float(getattr(segment, "end", 0.0)) - float(getattr(segment, "start", 0.0)))
+
+
+def build_embedding_windows(segment, profile):
+    duration = segment_duration(segment)
+    start = float(getattr(segment, "start", 0.0))
+    end = float(getattr(segment, "end", start))
+    if duration <= profile.window_sec * 1.5:
+        return [(start, end)]
+
+    step_sec = profile.step_for_duration(duration)
+    windows = []
+    window_start = start
+    while window_start + profile.min_segment_duration_sec < end:
+        window_end = min(window_start + profile.window_sec, end)
+        windows.append((round(window_start, 6), round(window_end, 6)))
+        window_start += step_sec
+    return windows
+
+
+def backend_kwargs(
+    num_speakers=None,
+    min_speakers=None,
+    max_speakers=None,
+    embedding_profile=None,
+):
     kwargs = {}
     if num_speakers is not None:
         kwargs["num_speakers"] = num_speakers
@@ -93,6 +178,8 @@ def backend_kwargs(num_speakers=None, min_speakers=None, max_speakers=None):
         kwargs["min_speakers"] = min_speakers
     if max_speakers is not None:
         kwargs["max_speakers"] = max_speakers
+    if embedding_profile is not None:
+        kwargs["embedding_profile"] = embedding_profile
     return kwargs
 
 
@@ -153,6 +240,39 @@ def build_speaker_centroids(embeddings, labels):
     return centroids
 
 
+def _speaker_centroid_matrix(embeddings, labels):
+    import numpy as np
+
+    if len(embeddings) == 0 or len(embeddings) != len(labels):
+        return [], np.empty((0, 0), dtype=float)
+
+    normalized = _normalize_rows(embeddings)
+    label_values = sorted({int(label) for label in labels})
+    centroids = []
+    for label in label_values:
+        members = normalized[labels == label]
+        if len(members) == 0:
+            continue
+        centroid = _normalize_rows(members.mean(axis=0, keepdims=True))[0]
+        if np.any(centroid):
+            centroids.append(centroid)
+    if not centroids:
+        return [], np.empty((0, 0), dtype=float)
+    return label_values, np.stack(centroids)
+
+
+def assign_embeddings_to_centroids(embeddings, base_embeddings, labels):
+    import numpy as np
+
+    label_values, centroids = _speaker_centroid_matrix(base_embeddings, labels)
+    if not label_values or len(embeddings) == 0:
+        return np.empty((0,), dtype=int)
+
+    scores = _normalize_rows(embeddings) @ centroids.T
+    best = scores.argmax(axis=1)
+    return np.asarray([label_values[index] for index in best], dtype=int)
+
+
 class ReusableDiarizeEngine:
     def __init__(self, speaker_factory=None):
         self._speaker_factory = speaker_factory
@@ -196,6 +316,15 @@ class ReusableDiarizeEngine:
 
             wav = torchaudio.transforms.Resample(sample_rate, sampling_rate)(wav)
         return wav
+
+    def read_audio_data(self, audio_path):
+        import numpy as np
+        import soundfile as sf
+
+        audio_data, sample_rate = sf.read(str(audio_path), dtype="float32")
+        if audio_data.ndim > 1:
+            audio_data = audio_data.mean(axis=1)
+        return np.ascontiguousarray(audio_data, dtype=np.float32), sample_rate
 
     def run_vad(self, audio_path):
         from diarize.utils import SpeechSegment
@@ -244,32 +373,31 @@ class ReusableDiarizeEngine:
         features = np.expand_dims(features, 0)
         return self.speaker.extract_embedding_feat(features)
 
-    def extract_embeddings(self, audio_path, speech_segments):
+    def extract_embeddings_from_audio(self, audio_data, sample_rate, speech_segments, profile):
         import numpy as np
-        import soundfile as sf
-        from diarize.embeddings import EMBEDDING_STEP, EMBEDDING_WINDOW, MIN_SEGMENT_DURATION
         from diarize.utils import SubSegment
-
-        audio_data, sample_rate = sf.read(str(audio_path))
-        if audio_data.ndim > 1:
-            audio_data = audio_data.mean(axis=1)
 
         embeddings = []
         subsegments = []
+        stats = {
+            "windowCount": 0,
+            "adaptiveWindowCount": 0,
+            "shortSegmentWindowCount": 0,
+            "skippedShortSpeechSegments": 0,
+        }
 
         for index, segment in enumerate(speech_segments):
-            if segment.duration < MIN_SEGMENT_DURATION:
+            duration = segment_duration(segment)
+            if duration < profile.min_segment_duration_sec:
+                stats["skippedShortSpeechSegments"] += 1
                 continue
 
-            if segment.duration <= EMBEDDING_WINDOW * 1.5:
-                windows = [(segment.start, segment.end)]
-            else:
-                windows = []
-                window_start = segment.start
-                while window_start + MIN_SEGMENT_DURATION < segment.end:
-                    window_end = min(window_start + EMBEDDING_WINDOW, segment.end)
-                    windows.append((window_start, window_end))
-                    window_start += EMBEDDING_STEP
+            windows = build_embedding_windows(segment, profile)
+            stats["windowCount"] += len(windows)
+            if duration <= profile.window_sec * 1.5:
+                stats["shortSegmentWindowCount"] += len(windows)
+            elif profile.step_for_duration(duration) > profile.base_step_sec:
+                stats["adaptiveWindowCount"] += len(windows)
 
             for window_start, window_end in windows:
                 start_sample = int(window_start * sample_rate)
@@ -291,8 +419,89 @@ class ReusableDiarizeEngine:
                     )
 
         if not embeddings:
+            return np.empty((0, 256), dtype=np.float32), [], stats
+        return np.stack(embeddings), subsegments, stats
+
+    def extract_boundary_embeddings_from_audio(
+        self,
+        audio_data,
+        sample_rate,
+        speech_segments,
+        subsegments,
+        labels,
+        profile,
+    ):
+        import numpy as np
+        from diarize.utils import SubSegment
+
+        if not profile.boundary_refinement or len(subsegments) < 2:
             return np.empty((0, 256), dtype=np.float32), []
-        return np.stack(embeddings), subsegments
+
+        subsegments_by_parent = {}
+        for index, subsegment in enumerate(subsegments):
+            subsegments_by_parent.setdefault(subsegment.parent_idx, []).append(index)
+
+        embeddings = []
+        refined_subsegments = []
+        seen = set()
+        for parent_idx, indices in subsegments_by_parent.items():
+            if len(indices) < 2:
+                continue
+            indices.sort(key=lambda idx: subsegments[idx].start)
+            speech_segment = speech_segments[parent_idx]
+            for left_idx, right_idx in zip(indices, indices[1:]):
+                if int(labels[left_idx]) == int(labels[right_idx]):
+                    continue
+
+                left = subsegments[left_idx]
+                right = subsegments[right_idx]
+                left_center = (left.start + left.end) / 2
+                right_center = (right.start + right.end) / 2
+                center = (left_center + right_center) / 2
+                window_start = max(speech_segment.start, center - profile.window_sec / 2)
+                window_end = min(speech_segment.end, window_start + profile.window_sec)
+                if window_end - window_start < profile.min_segment_duration_sec:
+                    continue
+                key = (parent_idx, round(window_start, 2), round(window_end, 2))
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                start_sample = int(window_start * sample_rate)
+                end_sample = int(window_end * sample_rate)
+                segment_audio = audio_data[start_sample:end_sample]
+                try:
+                    embedding = self.extract_embedding_from_audio(segment_audio, sample_rate)
+                except Exception:
+                    continue
+                if embedding is None:
+                    continue
+                embedding = np.asarray(embedding)
+                if embedding.ndim == 2:
+                    embedding = embedding[0]
+                embeddings.append(embedding)
+                refined_subsegments.append(
+                    SubSegment(start=window_start, end=window_end, parent_idx=parent_idx)
+                )
+
+        if not embeddings:
+            return np.empty((0, 256), dtype=np.float32), []
+        return np.stack(embeddings), refined_subsegments
+
+    def sort_labeled_embeddings(self, embeddings, subsegments, labels):
+        import numpy as np
+
+        order = sorted(
+            range(len(subsegments)),
+            key=lambda idx: (subsegments[idx].parent_idx, subsegments[idx].start, subsegments[idx].end),
+        )
+        if not order:
+            return embeddings, subsegments, labels
+        return (
+            embeddings[order],
+            [subsegments[idx] for idx in order],
+            np.asarray([labels[idx] for idx in order], dtype=int),
+        )
 
     def diarize(
         self,
@@ -301,6 +510,7 @@ class ReusableDiarizeEngine:
         min_speakers=1,
         max_speakers=20,
         num_speakers=None,
+        embedding_profile=None,
     ):
         from diarize import _build_diarization_segments
         from diarize.clustering import cluster_speakers
@@ -316,32 +526,125 @@ class ReusableDiarizeEngine:
             raise ValueError(f"num_speakers must be >= 1, got {num_speakers}")
 
         audio_path = str(audio_path)
+        profile = embedding_profile_config(embedding_profile)
+        timings = {}
+        probe_started = time.perf_counter()
         duration = get_audio_duration(audio_path)
+        timings["audioProbeSec"] = time.perf_counter() - probe_started
+        vad_started = time.perf_counter()
         speech_segments = self.run_vad(audio_path)
+        timings["vadSec"] = time.perf_counter() - vad_started
         if not speech_segments:
-            return SimpleNamespace(audio_duration=duration, segments=[], speaker_centroids={})
+            return SimpleNamespace(
+                audio_duration=duration,
+                segments=[],
+                speaker_centroids={},
+                profile=self.build_profile(profile, timings, len(speech_segments), 0, 0, {}),
+            )
 
-        embeddings, subsegments = self.extract_embeddings(audio_path, speech_segments)
+        embedding_started = time.perf_counter()
+        audio_data, sample_rate = self.read_audio_data(audio_path)
+        embeddings, subsegments, embedding_stats = self.extract_embeddings_from_audio(
+            audio_data,
+            sample_rate,
+            speech_segments,
+            profile,
+        )
+        timings["embeddingSec"] = time.perf_counter() - embedding_started
         if len(embeddings) == 0:
-            return SimpleNamespace(audio_duration=duration, segments=[], speaker_centroids={})
+            return SimpleNamespace(
+                audio_duration=duration,
+                segments=[],
+                speaker_centroids={},
+                profile=self.build_profile(
+                    profile,
+                    timings,
+                    len(speech_segments),
+                    len(subsegments),
+                    len(embeddings),
+                    embedding_stats,
+                ),
+            )
 
+        clustering_started = time.perf_counter()
         labels, _estimation_details = cluster_speakers(
             embeddings,
             min_speakers=min_speakers,
             max_speakers=max_speakers,
             num_speakers=num_speakers,
         )
+        timings["clusteringSec"] = time.perf_counter() - clustering_started
+
+        boundary_started = time.perf_counter()
+        boundary_embeddings, boundary_subsegments = self.extract_boundary_embeddings_from_audio(
+            audio_data,
+            sample_rate,
+            speech_segments,
+            subsegments,
+            labels,
+            profile,
+        )
+        boundary_labels = assign_embeddings_to_centroids(boundary_embeddings, embeddings, labels)
+        if len(boundary_embeddings) > 0 and len(boundary_labels) == len(boundary_embeddings):
+            import numpy as np
+
+            embeddings = np.concatenate([embeddings, boundary_embeddings], axis=0)
+            labels = np.concatenate([labels, boundary_labels], axis=0)
+            subsegments = subsegments + boundary_subsegments
+            embeddings, subsegments, labels = self.sort_labeled_embeddings(
+                embeddings,
+                subsegments,
+                labels,
+            )
+        timings["boundaryRefinementSec"] = time.perf_counter() - boundary_started
+
+        build_started = time.perf_counter()
         segments = _build_diarization_segments(
             speech_segments,
             subsegments,
             labels,
             embeddings,
         )
+        timings["buildSegmentsSec"] = time.perf_counter() - build_started
         return SimpleNamespace(
             audio_duration=duration,
             segments=segments,
             speaker_centroids=build_speaker_centroids(embeddings, labels),
+            profile=self.build_profile(
+                profile,
+                timings,
+                len(speech_segments),
+                len(subsegments),
+                len(embeddings),
+                {
+                    **embedding_stats,
+                    "boundaryRefinementWindowCount": len(boundary_subsegments),
+                },
+            ),
         )
+
+    def build_profile(
+        self,
+        profile,
+        timings,
+        speech_segment_count,
+        subsegment_count,
+        embedding_count,
+        embedding_stats,
+    ):
+        return {
+            "embeddingProfile": profile.name,
+            "embeddingWindowSec": profile.window_sec,
+            "embeddingBaseStepSec": profile.base_step_sec,
+            "embeddingLongStepSec": profile.long_step_sec,
+            "embeddingLongSegmentThresholdSec": profile.long_segment_threshold_sec,
+            "boundaryRefinement": profile.boundary_refinement,
+            "speechSegmentCount": speech_segment_count,
+            "subsegmentCount": subsegment_count,
+            "embeddingCount": embedding_count,
+            **embedding_stats,
+            "timings": {key: round(value, 6) for key, value in timings.items()},
+        }
 
 
 def load_diarize_function():
@@ -376,11 +679,12 @@ def run_backend_with_diarize(
     num_speakers=None,
     min_speakers=None,
     max_speakers=None,
+    embedding_profile=None,
 ):
     payload = build_payload_with_diarize(
         diarize_fn,
         audio_path,
-        backend_kwargs(num_speakers, min_speakers, max_speakers),
+        backend_kwargs(num_speakers, min_speakers, max_speakers, embedding_profile),
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -414,7 +718,14 @@ def run_backend_with_diarize(
     return report
 
 
-def run_backend(audio_path, output_dir, num_speakers=None, min_speakers=None, max_speakers=None):
+def run_backend(
+    audio_path,
+    output_dir,
+    num_speakers=None,
+    min_speakers=None,
+    max_speakers=None,
+    embedding_profile=None,
+):
     return run_backend_with_diarize(
         load_diarize_function(),
         audio_path,
@@ -422,6 +733,7 @@ def run_backend(audio_path, output_dir, num_speakers=None, min_speakers=None, ma
         num_speakers=num_speakers,
         min_speakers=min_speakers,
         max_speakers=max_speakers,
+        embedding_profile=embedding_profile,
     )
 
 
@@ -474,8 +786,9 @@ def run_backend_batch_with_diarize(
     max_speakers=None,
     max_workers=1,
     diarize_factory=None,
+    embedding_profile=None,
 ):
-    kwargs = backend_kwargs(num_speakers, min_speakers, max_speakers)
+    kwargs = backend_kwargs(num_speakers, min_speakers, max_speakers, embedding_profile)
     safe_workers = normalize_max_workers(max_workers, len(chunks))
     started = time.perf_counter()
 
@@ -540,6 +853,38 @@ def run_backend_batch_with_diarize(
         ),
         "outputFiles": [str(report_path), str(chunks_path)],
     }
+    chunk_profiles = [
+        chunk["report"].get("profile")
+        for chunk in chunk_outputs
+        if chunk["report"].get("profile")
+    ]
+    if chunk_profiles:
+        timing_keys = sorted(
+            {
+                key
+                for profile in chunk_profiles
+                for key in profile.get("timings", {}).keys()
+            }
+        )
+        report["profile"] = {
+            "embeddingProfile": chunk_profiles[0].get("embeddingProfile"),
+            "embeddingCount": sum(int(profile.get("embeddingCount") or 0) for profile in chunk_profiles),
+            "subsegmentCount": sum(int(profile.get("subsegmentCount") or 0) for profile in chunk_profiles),
+            "speechSegmentCount": sum(
+                int(profile.get("speechSegmentCount") or 0) for profile in chunk_profiles
+            ),
+            "boundaryRefinementWindowCount": sum(
+                int(profile.get("boundaryRefinementWindowCount") or 0)
+                for profile in chunk_profiles
+            ),
+            "timings": {
+                key: round(
+                    sum(float(profile.get("timings", {}).get(key) or 0.0) for profile in chunk_profiles),
+                    6,
+                )
+                for key in timing_keys
+            },
+        }
     warnings = dependency_warnings()
     if warnings:
         report["dependencyWarnings"] = warnings
@@ -554,6 +899,7 @@ def run_backend_batch(
     min_speakers=None,
     max_speakers=None,
     max_workers=1,
+    embedding_profile=None,
 ):
     chunks = json.loads(Path(chunks_path).read_text(encoding="utf-8"))
     if not isinstance(chunks, list):
@@ -568,6 +914,7 @@ def run_backend_batch(
         max_speakers=max_speakers,
         max_workers=safe_workers,
         diarize_factory=load_diarize_function,
+        embedding_profile=embedding_profile,
     )
 
 
@@ -580,6 +927,11 @@ def parse_args():
     parser.add_argument("--min-speakers", type=int)
     parser.add_argument("--max-speakers", type=int)
     parser.add_argument("--max-workers", type=int, default=1, help="Maximum parallel chunks in batch mode")
+    parser.add_argument(
+        "--embedding-profile",
+        choices=["quality", "balanced", "fast", "boundary"],
+        help="Embedding density profile. quality preserves legacy dense windows; balanced is the default adaptive mode; boundary enables experimental second-pass boundary refinement.",
+    )
     parser.add_argument("--json", action="store_true", help="Print the full JSON report.")
     return parser.parse_args()
 
@@ -625,6 +977,7 @@ if __name__ == "__main__":
             min_speakers=args.min_speakers,
             max_speakers=args.max_speakers,
             max_workers=args.max_workers,
+            embedding_profile=args.embedding_profile,
         )
     else:
         if not args.audio:
@@ -635,6 +988,7 @@ if __name__ == "__main__":
             num_speakers=args.num_speakers,
             min_speakers=args.min_speakers,
             max_speakers=args.max_speakers,
+            embedding_profile=args.embedding_profile,
         )
     if args.json:
         print(json.dumps(report, ensure_ascii=False))

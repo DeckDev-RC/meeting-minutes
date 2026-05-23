@@ -811,6 +811,57 @@ fn modern_cpu_batch_centroids_respect_expected_speaker_cap() {
 }
 
 #[test]
+fn global_centroid_mapping_groups_matching_speakers_before_stitching() {
+    let chunks = vec![
+        DiarizedChunkResult {
+            diarized: DiarizedResult {
+                speakers: vec!["Falante 1".to_string()],
+                segments: vec![],
+            },
+            speaker_centroids: vec![SpeakerCentroid {
+                speaker: "Falante 1".to_string(),
+                embedding: vec![1.0, 0.0],
+            }],
+        },
+        DiarizedChunkResult {
+            diarized: DiarizedResult {
+                speakers: vec!["Falante 1".to_string()],
+                segments: vec![],
+            },
+            speaker_centroids: vec![SpeakerCentroid {
+                speaker: "Falante 1".to_string(),
+                embedding: vec![0.0, 1.0],
+            }],
+        },
+        DiarizedChunkResult {
+            diarized: DiarizedResult {
+                speakers: vec!["Falante 9".to_string()],
+                segments: vec![],
+            },
+            speaker_centroids: vec![SpeakerCentroid {
+                speaker: "Falante 9".to_string(),
+                embedding: vec![0.98, 0.02],
+            }],
+        },
+    ];
+
+    let mapping = global_centroid_speaker_map(&chunks, Some(2));
+
+    assert_eq!(
+        mapping.get(&(0, "Falante 1".to_string())).unwrap(),
+        "Falante 1"
+    );
+    assert_eq!(
+        mapping.get(&(1, "Falante 1".to_string())).unwrap(),
+        "Falante 2"
+    );
+    assert_eq!(
+        mapping.get(&(2, "Falante 9".to_string())).unwrap(),
+        "Falante 1"
+    );
+}
+
+#[test]
 fn modern_cpu_batch_outputs_are_shifted_and_stitched() {
     let raw = r#"[
         {

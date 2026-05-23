@@ -28,6 +28,8 @@ pub use refinement::{
     merge_selective_refinement, select_suspicious_chunks_for_refinement,
     select_suspicious_refinement_windows, select_suspicious_refinement_windows_with_context,
 };
+#[cfg(test)]
+use stitching::global_centroid_speaker_map;
 use stitching::stitch_diarized_chunk_results_with_centroids;
 pub use stitching::{
     segments_for_chunk, shift_diarized_result, stitch_diarized_chunk_results,
@@ -100,13 +102,6 @@ pub struct SpeakerCentroid {
 struct DiarizedChunkResult {
     diarized: DiarizedResult,
     speaker_centroids: Vec<SpeakerCentroid>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct GlobalSpeakerCentroid {
-    speaker: String,
-    embedding: Vec<f64>,
-    observations: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
