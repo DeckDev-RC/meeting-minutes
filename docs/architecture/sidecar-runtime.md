@@ -33,6 +33,54 @@ Eskuta uses a PyInstaller sidecar. That is the right long-term packaging shape f
 
 PyInstaller can change startup time, import resolution, model file lookup, and native library loading. For this app, runtime behavior is more important than bundle elegance. The current bundled runtime stays until a sidecar build proves parity.
 
+## Experimental Sidecar Contract
+
+The Phase 4 experimental entrypoint is:
+
+```powershell
+python scripts\meeting_minutes_sidecar.py health
+python scripts\meeting_minutes_sidecar.py transcribe-local --input request.json --output response.json
+python scripts\meeting_minutes_sidecar.py diarize-modern-cpu --input request.json --output response.json
+```
+
+Build command:
+
+```powershell
+npm run sidecar:build
+```
+
+The sidecar is not the default runtime. It is only a benchmark candidate until it beats or matches the bundled runtime matrix.
+
+`diarize-modern-cpu` response includes the SDD turn contract:
+
+```json
+{
+  "ok": true,
+  "command": "diarize-modern-cpu",
+  "turns": [{ "start": 0.0, "end": 4.2, "speakerIndex": 0 }],
+  "telemetry": {
+    "backend": "sidecar-modern-cpu",
+    "wallClockSec": 42.1,
+    "commandWallClockSec": 42.4
+  }
+}
+```
+
+`transcribe-local` response keeps the faster-whisper report and adds normalized sidecar telemetry:
+
+```json
+{
+  "ok": true,
+  "command": "transcribe-local",
+  "segments": [],
+  "telemetry": {
+    "backend": "sidecar-faster-whisper",
+    "model": "turbo",
+    "speedX": 12.0
+  }
+}
+```
+
 ## Boundary Modules Added
 
 The Rust modules below define the seams for incremental migration without a rewrite:
