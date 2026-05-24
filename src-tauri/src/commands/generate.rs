@@ -713,6 +713,151 @@ fn display_owner(owner: &str) -> String {
     }
 }
 
+fn fold_latin_lower(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for ch in value.chars() {
+        for lower in ch.to_lowercase() {
+            let folded = match lower {
+                'á' | 'à' | 'â' | 'ã' | 'ä' => 'a',
+                'é' | 'è' | 'ê' | 'ë' => 'e',
+                'í' | 'ì' | 'î' | 'ï' => 'i',
+                'ó' | 'ò' | 'ô' | 'õ' | 'ö' => 'o',
+                'ú' | 'ù' | 'û' | 'ü' => 'u',
+                'ç' => 'c',
+                other => other,
+            };
+            output.push(folded);
+        }
+    }
+
+    output.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn owner_name_is_promotable_participant(owner: &str) -> bool {
+    let trimmed = owner.trim();
+    if display_owner(trimmed) == "A definir" {
+        return false;
+    }
+
+    if trimmed.chars().any(|ch| {
+        matches!(
+            ch,
+            '[' | ']' | '{' | '}' | '(' | ')' | '<' | '>' | '@' | '#'
+        )
+    }) {
+        return false;
+    }
+
+    let folded = fold_latin_lower(trimmed);
+    if folded.is_empty() {
+        return false;
+    }
+
+    const GENERIC_OWNER_VALUES: &[&str] = &[
+        "a definir",
+        "indefinido",
+        "na",
+        "n a",
+        "n/a",
+        "nao informado",
+        "nao informada",
+        "nao especificado",
+        "nao especificada",
+        "sem responsavel",
+        "todos",
+        "todas",
+        "todos os participantes",
+        "participantes",
+        "participante",
+        "responsavel",
+        "responsaveis",
+        "equipe",
+        "time",
+        "grupo",
+        "implicit",
+        "implicito",
+        "undefined",
+        "unspecified",
+    ];
+    if GENERIC_OWNER_VALUES.contains(&folded.as_str()) {
+        return false;
+    }
+
+    let tokens = word_tokens_lower_ordered(&folded);
+    if tokens.is_empty() || tokens.iter().any(|token| token.chars().count() < 2) {
+        return false;
+    }
+
+    const GENERIC_OWNER_TOKENS: &[&str] = &[
+        "administrativo",
+        "aprovacao",
+        "aprovador",
+        "area",
+        "cliente",
+        "clientes",
+        "comercial",
+        "contabil",
+        "contabilidade",
+        "departamento",
+        "diretoria",
+        "empresa",
+        "equipe",
+        "especificado",
+        "financeiro",
+        "fornecedor",
+        "fornecedores",
+        "gestao",
+        "grupo",
+        "implicit",
+        "implicito",
+        "juridico",
+        "lideranca",
+        "marketing",
+        "narrador",
+        "operacao",
+        "operacoes",
+        "participante",
+        "participantes",
+        "responsavel",
+        "responsaveis",
+        "setor",
+        "sistema",
+        "suporte",
+        "time",
+        "vendas",
+    ];
+    !tokens
+        .iter()
+        .any(|token| GENERIC_OWNER_TOKENS.contains(&token.as_str()))
+}
+
+fn owner_participant_candidates(owner: &str) -> Vec<String> {
+    owner
+        .split(',')
+        .flat_map(|part| part.split(';'))
+        .flat_map(|part| part.split('/'))
+        .flat_map(|part| part.split('\\'))
+        .flat_map(|part| part.split(" e "))
+        .flat_map(|part| part.split(" E "))
+        .flat_map(|part| part.split(" & "))
+        .map(str::trim)
+        .filter(|name| owner_name_is_promotable_participant(name))
+        .map(str::to_string)
+        .collect()
+}
+
+fn owner_participant_names(
+    decisions: &[MeetingDecision],
+    actions: &[MeetingAction],
+) -> Vec<String> {
+    decisions
+        .iter()
+        .map(|decision| decision.owner.as_str())
+        .chain(actions.iter().map(|action| action.owner.as_str()))
+        .flat_map(owner_participant_candidates)
+        .collect()
+}
+
 fn infer_minutes_title(topics: &[String]) -> String {
     let topic = topics
         .iter()
@@ -803,34 +948,11 @@ fn build_minutes_fact_graph(
     let questions = unique_strings(question_values);
     let risks = unique_strings(risk_values);
     let summaries = unique_strings(summary_values);
+    let owner_names = owner_participant_names(&decisions, &actions);
 
     let participants = if participant_names.is_empty() {
-        let owner_names = decisions
-            .iter()
-            .map(|decision| decision.owner.clone())
-            .chain(actions.iter().map(|action| action.owner.clone()))
-            .flat_map(|owner| {
-                owner
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|name| !name.is_empty() && display_owner(name) != "A definir")
-                    .map(str::to_string)
-                    .collect::<Vec<_>>()
-            });
         unique_strings(diarized.speakers.clone().into_iter().chain(owner_names))
     } else {
-        let owner_names = decisions
-            .iter()
-            .map(|decision| decision.owner.clone())
-            .chain(actions.iter().map(|action| action.owner.clone()))
-            .flat_map(|owner| {
-                owner
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|name| !name.is_empty() && display_owner(name) != "A definir")
-                    .map(str::to_string)
-                    .collect::<Vec<_>>()
-            });
         unique_strings(participant_names.clone().into_iter().chain(owner_names))
     };
     MinutesFactGraph {

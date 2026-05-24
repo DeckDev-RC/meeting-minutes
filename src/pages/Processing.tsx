@@ -2,6 +2,21 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { listen as tauriListen } from "@tauri-apps/api/event";
 import { useParams, useNavigate } from "react-router-dom";
 import ProgressPipeline from "../components/ProgressPipeline";
+import LiveProcessingPanel from "./processing/LiveProcessingPanel";
+import {
+  chunkOverlapForProfile,
+  formatError,
+  htmlToReadablePreview,
+  joinPath,
+  normalizeProcessingProfile,
+  parseCachedFacts,
+  parseParticipantsHint,
+  parseStoredSegments,
+  summarizeBackendError,
+  sumChunkDurations,
+  toExportedChunk,
+  toNewProcessingChunkRecord,
+} from "./processing/utils";
 import { useMeetingStore } from "../store/meetingStore";
 import {
   alignSpeakerTurnsToTranscription,
@@ -29,6 +44,7 @@ import {
   updateProcessingChunkFacts,
   updateProcessingChunkResult,
   updateMeetingStatus,
+  upsertProcessingJob,
   getMeetings,
   refineDiarizationSelectively,
 } from "../lib/tauri";
@@ -121,11 +137,6 @@ type FactQueueItem = {
   segmentsJson: string;
 };
 
-const joinPath = (dir: string, fileName: string) => {
-  const separator = dir.includes("\\") ? "\\" : "/";
-  return `${dir.replace(/[\\/]+$/, "")}${separator}${fileName}`;
-};
-
 const flushLiveStateSnapshot = (meetingId: string) => {
   const timer = liveProcessingPublishTimers.get(meetingId);
   if (timer) {
@@ -211,138 +222,11 @@ const markProcessingSnapshotCompleted = (meetingId: string) => {
   cleanupCompletedLiveProcessingSnapshots();
 };
 
-const chunkOverlapForProfile = (profile: ProcessingProfile) => {
-  if (profile === "turbo") return 0;
-  return 3;
-};
-
-const formatError = (err: unknown) => {
-  if (typeof err === "string") return err.trim();
-  if (err instanceof Error) return err.message.trim();
-  if (err && typeof err === "object") {
-    const maybeMessage = "message" in err ? String((err as { message?: unknown }).message ?? "") : "";
-    if (maybeMessage.trim()) return maybeMessage.trim();
-    try {
-      return JSON.stringify(err);
-    } catch {
-      return String(err);
-    }
-  }
-  return "";
-};
-
-const toExportedChunk = (chunk: ProcessingChunkRecord): ExportedChunk => ({
-  index: chunk.index,
-  audioPath: chunk.audioPath,
-  startSec: chunk.startSec,
-  endSec: chunk.endSec,
-  offsetSec: chunk.offsetSec,
-  durationSec: chunk.durationSec,
-});
-
-const toNewProcessingChunkRecord = (
-  meetingId: string,
-  chunk: ExportedChunk,
-): ProcessingChunkRecord => ({
-  meetingId,
-  index: chunk.index,
-  audioPath: chunk.audioPath,
-  startSec: chunk.startSec,
-  endSec: chunk.endSec,
-  offsetSec: chunk.offsetSec,
-  durationSec: chunk.durationSec,
-  status: "pending",
-  rawSegmentsJson: null,
-  errorMsg: null,
-  factsStatus: "pending",
-  factsJson: null,
-  factsErrorMsg: null,
-});
-
-const sumChunkDurations = (chunks: Pick<ProcessingChunkRecord, "durationSec">[]) =>
-  chunks.reduce((sum, chunk) => sum + chunk.durationSec, 0);
-
-const isTranscriptionSegment = (value: unknown): value is TranscriptionSegment => {
-  if (!value || typeof value !== "object") return false;
-  const segment = value as Partial<TranscriptionSegment>;
-
-  return (
-    typeof segment.id === "number" &&
-    typeof segment.start === "number" &&
-    typeof segment.end === "number" &&
-    typeof segment.text === "string"
-  );
-};
-
-const parseStoredSegments = (chunk: ProcessingChunkRecord): TranscriptionSegment[] => {
-  if (!chunk.rawSegmentsJson) {
-    throw new Error(`Trecho ${chunk.index} marcado como concluido sem transcricao salva.`);
-  }
-
-  try {
-    const parsed = JSON.parse(chunk.rawSegmentsJson) as unknown;
-    if (!Array.isArray(parsed) || !parsed.every(isTranscriptionSegment)) {
-      throw new Error("formato inesperado");
-    }
-    return parsed;
-  } catch (err) {
-    throw new Error(
-      `Transcricao salva do trecho ${chunk.index} esta invalida: ${
-        formatError(err) || "JSON invalido"
-      }`,
-    );
-  }
-};
-
-const isMeetingChunkInsights = (value: unknown): value is MeetingChunkInsights => {
-  if (!value || typeof value !== "object") return false;
-  const item = value as Partial<MeetingChunkInsights>;
-  return (
-    typeof item.chunkIndex === "number" &&
-    typeof item.startSec === "number" &&
-    typeof item.endSec === "number" &&
-    typeof item.summary === "string" &&
-    Array.isArray(item.topics) &&
-    Array.isArray(item.decisions) &&
-    Array.isArray(item.actions) &&
-    Array.isArray(item.questions) &&
-    Array.isArray(item.risks)
-  );
-};
-
-const parseCachedFacts = (chunk: ProcessingChunkRecord): MeetingChunkInsights | null => {
-  if (chunk.factsStatus !== "done" || !chunk.factsJson) return null;
-  try {
-    const parsed = JSON.parse(chunk.factsJson) as unknown;
-    return isMeetingChunkInsights(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
-};
-
 type SpeculativeSpeakerTurns = {
   turns: SpeakerTurn[];
   error: string;
   engine: "pyannote" | "modern-cpu" | "modern-cpu-chunked" | "sherpa-onnx" | "none";
   fallbackReason?: string;
-};
-
-const summarizeBackendError = (message: string) => {
-  const clean = message.replace(/\r/g, "").trim();
-  if (!clean) return "";
-  if (clean.includes("Please enable access to public gated repositories")) {
-    return "Token Hugging Face sem permissao para repositorios publicos gated.";
-  }
-  if (clean.includes("403 Forbidden")) {
-    return "Hugging Face retornou 403 para o modelo pyannote.";
-  }
-  if (clean.includes("HF_TOKEN is not available")) {
-    return "HF_TOKEN nao esta disponivel para o worker pyannote.";
-  }
-  if (clean.includes("pyannote.audio") && clean.includes("not installed")) {
-    return "Ambiente pyannote nao esta instalado.";
-  }
-  return clean.split("\n").find((line) => line.trim())?.trim().slice(0, 180) || "";
 };
 
 const startSpeculativeSpeakerTurns = (
@@ -452,39 +336,6 @@ const PROFILE_LABELS: Record<ProcessingProfile, string> = {
   precision: "Precisao",
 };
 
-const normalizeProcessingProfile = (value: string | null | undefined): ProcessingProfile => {
-  if (value === "turbo" || value === "precision") return value;
-  return "balanced";
-};
-
-const parseParticipantsHint = (hint: string | null | undefined) =>
-  (hint || "")
-    .split(/[\n,;]+/)
-    .map((name) => name.trim())
-    .filter(Boolean)
-    .slice(0, 30);
-
-const htmlToReadablePreview = (html: string) =>
-  html
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<\/(p|div|section|h[1-6]|li|tr)>/gi, "\n")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-
-const liveLogBadgeClass = (level: LiveLogLevel) => {
-  if (level === "success") return "bg-emerald-50 text-emerald-700 ring-emerald-200";
-  if (level === "warning") return "bg-amber-50 text-amber-700 ring-amber-200";
-  if (level === "error") return "bg-red-50 text-red-700 ring-red-200";
-  return "bg-blue-50 text-blue-700 ring-blue-200";
-};
-
 const listenToAppEvent = <T,>(eventName: string, handler: (event: { payload: T }) => void) => {
   const mock = window.__MEETING_MINUTES_E2E__?.listen;
   if (mock) {
@@ -511,6 +362,7 @@ export default function Processing() {
   const progressTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
   const minutesStreamRenderTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
   const minutesStreamRawRef = useRef("");
+  const processingJobSnapshotRef = useRef(new Map<string, string>());
   const [runProfile, setRunProfile] = useState<ProcessingProfile>("balanced");
   const [liveState, setLiveState] = useState<LiveProcessingState>(() =>
     createLiveProcessingState(),
@@ -552,6 +404,25 @@ export default function Processing() {
     commitLiveState(meetingId, (state) =>
       appendLiveLog(state, level, message, (Date.now() - startedAtRef.current) / 1000),
     );
+  };
+
+  const recordProcessingJob = (
+    meetingId: string,
+    stage: string,
+    status: "pending" | "running" | "done" | "error",
+    progressPct: number,
+    errorMsg?: string | null,
+  ) => {
+    const safeProgress = Math.max(0, Math.min(100, Math.round(progressPct)));
+    const key = `${meetingId}:${stage}`;
+    const snapshot = `${status}:${safeProgress}:${errorMsg ?? ""}`;
+    if (processingJobSnapshotRef.current.get(key) === snapshot) {
+      return;
+    }
+    processingJobSnapshotRef.current.set(key, snapshot);
+    void upsertProcessingJob(meetingId, stage, status, safeProgress, errorMsg).catch((err) => {
+      console.warn("Failed to persist processing job:", err);
+    });
   };
 
   const flushMinutesStreamPreview = (meetingId: string) => {
@@ -604,6 +475,14 @@ export default function Processing() {
       totalChunks,
       elapsedMs: Date.now() - startedAtRef.current,
     });
+    if (id) {
+      recordProcessingJob(
+        id,
+        phase,
+        phase === "complete" ? "done" : "running",
+        view.percent,
+      );
+    }
     const now = Date.now();
     const shouldRenderNow =
       phase === "complete" ||
@@ -1822,8 +1701,15 @@ export default function Processing() {
       setStepStatus("generate", "done");
       addLiveLog(meetingId, "success", "Ata final gerada.");
 
-      // Save minutes
-      await saveMinutes(meetingId, ataHtml);
+      // Save minutes plus the structured facts used to build the document.
+      await saveMinutes(
+        meetingId,
+        ataHtml,
+        undefined,
+        meetingFactsJson,
+        diarizedJson,
+        participantNames,
+      );
 
       const benchmarkRun = buildBenchmarkRun({
         meetingId,
@@ -1861,6 +1747,13 @@ export default function Processing() {
       if (step) setStepStatus(step, "error");
       addLiveLog(meetingId, "error", formatError(err) || "Erro desconhecido no processamento.");
       setError(formatError(err) || "Erro desconhecido");
+      recordProcessingJob(
+        meetingId,
+        "pipeline",
+        "error",
+        progress,
+        formatError(err) || "Erro desconhecido no processamento.",
+      );
       if (id) await updateMeetingStatus(id, "error").catch(() => {});
       markProcessingSnapshotCompleted(meetingId);
     }
@@ -1968,221 +1861,18 @@ export default function Processing() {
           />
         </div>
       </div>
-      <section
-        aria-label="Painel ao vivo do processamento"
-        className="rounded-lg border border-gray-200 bg-white shadow-sm"
-      >
-        <div className="flex flex-col gap-3 border-b border-gray-100 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">Ao vivo</p>
-            <h3 className="mt-1 text-lg font-semibold text-gray-950">
-              Transcricao, insights e ata
-            </h3>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {liveTabItems.map((tab) => {
-              const selected = liveTab === tab.key;
-              return (
-                <button
-                  key={tab.key}
-                  type="button"
-                  aria-pressed={selected}
-                  onClick={() => {
-                    if (tab.key === "transcript") {
-                      transcriptAutoScrollRef.current = false;
-                    }
-                    setLiveTab(tab.key);
-                  }}
-                  className={`rounded-lg px-3 py-2 text-sm font-semibold transition ${
-                    selected
-                      ? "bg-gray-950 text-white shadow-sm"
-                      : "bg-gray-50 text-gray-700 hover:bg-gray-100"
-                  }`}
-                >
-                  {tab.label}
-                  <span
-                    className={`ml-2 rounded-full px-2 py-0.5 text-xs ${
-                      selected ? "bg-white/15 text-white" : "bg-white text-gray-500"
-                    }`}
-                  >
-                    {tab.count}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        <div
-          ref={livePanelScrollRef}
-          role="region"
-          aria-label="Conteudo ao vivo"
-          className="max-h-[28rem] overflow-y-auto px-5 py-4"
-        >
-          {liveTab === "transcript" && (
-            <div className="space-y-2.5">
-              {liveState.transcript.length === 0 ? (
-                <p className="rounded-lg bg-gray-50 px-4 py-6 text-center text-sm text-gray-500">
-                  Aguardando primeiro trecho transcrito.
-                </p>
-              ) : (
-                liveState.transcript.map((item) => (
-                  <article
-                    key={item.id}
-                    className="grid gap-3 rounded-lg border border-gray-100 bg-white px-4 py-3 shadow-sm sm:grid-cols-[7rem_1fr]"
-                  >
-                    <div className="flex items-start gap-2 sm:block">
-                      <div className="rounded-md bg-blue-50 px-2.5 py-1 text-xs font-semibold tabular-nums text-blue-700">
-                        {item.timeLabel}
-                        <span className="mx-1 text-blue-300">-</span>
-                        {item.endTimeLabel}
-                      </div>
-                    </div>
-                    <div className="min-w-0">
-                      <div className="mb-1 flex flex-wrap items-center gap-2">
-                        <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-                          Bloco {item.chunkIndex + 1}
-                        </span>
-                        <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500">
-                          {item.segmentCount === 1 ? "1 fala" : `${item.segmentCount} falas`}
-                        </span>
-                        <span className="rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">
-                          {item.speaker}
-                        </span>
-                      </div>
-                      <p className="text-[15px] leading-7 text-gray-900">{item.text}</p>
-                    </div>
-                  </article>
-                ))
-              )}
-            </div>
-          )}
-
-          {liveTab === "insights" && (
-            <div className="space-y-3">
-              {liveState.insights.length === 0 ? (
-                <p className="rounded-lg bg-gray-50 px-4 py-6 text-center text-sm text-gray-500">
-                  Aguardando primeiros insights.
-                </p>
-              ) : (
-                liveState.insights.map((item) => (
-                  <article
-                    key={item.id}
-                    className="rounded-lg border border-gray-100 bg-gray-50 px-4 py-3"
-                  >
-                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                      <div>
-                        <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">
-                          {item.timeLabel} · Chunk {item.chunkIndex + 1}
-                        </p>
-                        <p className="mt-1 text-sm leading-6 text-gray-800">{item.summary}</p>
-                      </div>
-                      <div className="flex shrink-0 flex-wrap gap-2 text-xs font-semibold text-gray-600">
-                        <span className="rounded-full bg-white px-2 py-1">
-                          {item.decisionCount} decisoes
-                        </span>
-                        <span className="rounded-full bg-white px-2 py-1">
-                          {item.actionCount} acoes
-                        </span>
-                        <span className="rounded-full bg-white px-2 py-1">
-                          {item.riskCount} riscos
-                        </span>
-                      </div>
-                    </div>
-                    {item.topics.length > 0 && (
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        {item.topics.map((topic) => (
-                          <span
-                            key={topic}
-                            className="rounded-full border border-blue-100 bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700"
-                          >
-                            {topic}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                    {(item.decisions.length > 0 || item.actions.length > 0) && (
-                      <div className="mt-3 grid gap-3 md:grid-cols-2">
-                        {item.decisions.length > 0 && (
-                          <div>
-                            <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-                              Decisoes
-                            </p>
-                            <ul className="mt-1 space-y-1 text-sm leading-6 text-gray-800">
-                              {item.decisions.slice(0, 3).map((decision) => (
-                                <li key={decision}>- {decision}</li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-                        {item.actions.length > 0 && (
-                          <div>
-                            <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-                              Acoes
-                            </p>
-                            <ul className="mt-1 space-y-1 text-sm leading-6 text-gray-800">
-                              {item.actions.slice(0, 3).map((action) => (
-                                <li key={action}>- {action}</li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </article>
-                ))
-              )}
-            </div>
-          )}
-
-          {liveTab === "minutes" && (
-            <div className="space-y-4">
-              {liveState.finalMinutesText ? (
-                <pre className="whitespace-pre-wrap rounded-lg border border-blue-100 bg-blue-50 px-4 py-4 text-sm leading-6 text-gray-900">
-                  {liveState.finalMinutesText}
-                </pre>
-              ) : liveState.minutesDraft ? (
-                <pre className="whitespace-pre-wrap rounded-lg border border-gray-100 bg-gray-50 px-4 py-4 text-sm leading-6 text-gray-800">
-                  {liveState.minutesDraft}
-                </pre>
-              ) : (
-                <p className="rounded-lg bg-gray-50 px-4 py-6 text-center text-sm text-gray-500">
-                  Aguardando fatos para montar a ata.
-                </p>
-              )}
-            </div>
-          )}
-
-          {liveTab === "logs" && (
-            <div className="space-y-2">
-              {liveState.logs.length === 0 ? (
-                <p className="rounded-lg bg-gray-50 px-4 py-6 text-center text-sm text-gray-500">
-                  Aguardando eventos tecnicos.
-                </p>
-              ) : (
-                liveState.logs.map((item) => (
-                  <div
-                    key={item.id}
-                    className="flex gap-3 rounded-lg border border-gray-100 bg-gray-50 px-3 py-2 text-sm"
-                  >
-                    <span className="w-14 shrink-0 tabular-nums text-gray-500">
-                      {item.timeLabel}
-                    </span>
-                    <span
-                      className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold ring-1 ${liveLogBadgeClass(
-                        item.level,
-                      )}`}
-                    >
-                      {item.level}
-                    </span>
-                    <span className="min-w-0 text-gray-800">{item.message}</span>
-                  </div>
-                ))
-              )}
-            </div>
-          )}
-        </div>
-      </section>
+      <LiveProcessingPanel
+        liveState={liveState}
+        liveTab={liveTab}
+        liveTabItems={liveTabItems}
+        livePanelScrollRef={livePanelScrollRef}
+        onSelectTab={(tab) => {
+          if (tab === "transcript") {
+            transcriptAutoScrollRef.current = false;
+          }
+          setLiveTab(tab);
+        }}
+      />
       {error && (
         <div className="mt-6 p-4 bg-red-50 border border-red-200 rounded-lg">
           <p className="text-sm text-red-700">{error}</p>

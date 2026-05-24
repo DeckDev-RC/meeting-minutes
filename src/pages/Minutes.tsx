@@ -6,6 +6,7 @@ import SpeakerMapPanel from "../components/SpeakerMapPanel";
 import {
   getMinutesByMeeting,
   getProcessingChunks,
+  getStructuredMinutesByMeeting,
   getTranscriptionByMeeting,
   saveSpeakerMap,
 } from "../lib/tauri";
@@ -22,6 +23,7 @@ import type {
   MeetingChunkInsights,
   MeetingDecision,
   ProcessingChunkRecord,
+  StructuredMinutesData,
   TranscriptionSegment,
 } from "../lib/types";
 import {
@@ -31,8 +33,14 @@ import {
   parseSpeakerMapJson,
   type SpeakerMap,
 } from "../lib/speakerMap";
+import {
+  StructuredActionsPanel,
+  StructuredDecisionsPanel,
+  StructuredEvidencesPanel,
+  StructuredEvidenceWarning,
+} from "./minutes/StructuredMinutesPanels";
 
-type MinutesTab = "minutes" | "insights" | "speakers";
+type MinutesTab = "minutes" | "decisions" | "actions" | "evidences" | "insights" | "speakers";
 
 const formatTime = (seconds: number) => {
   const safe = Math.max(0, Math.round(Number.isFinite(seconds) ? seconds : 0));
@@ -194,6 +202,7 @@ function ActionItem({
 export default function Minutes() {
   const { id } = useParams<{ id: string }>();
   const [html, setHtml] = useState<string | null>(null);
+  const [structuredMinutes, setStructuredMinutes] = useState<StructuredMinutesData | null>(null);
   const [insights, setInsights] = useState<MeetingChunkInsights[]>([]);
   const [chunks, setChunks] = useState<ProcessingChunkRecord[]>([]);
   const [speakerLabels, setSpeakerLabels] = useState<string[]>([]);
@@ -208,14 +217,14 @@ export default function Minutes() {
 
   const loadMinutes = async (meetingId: string) => {
     try {
-      const [data, chunks, transcription] = await Promise.all([
-        getMinutesByMeeting(meetingId),
+      const [structured, data, chunks, transcription] = await Promise.all([
+        getStructuredMinutesByMeeting(meetingId).catch(() => null),
+        getMinutesByMeeting(meetingId).catch(() => null),
         getProcessingChunks(meetingId).catch(() => []),
         getTranscriptionByMeeting(meetingId).catch(() => null),
       ]);
-      if (data) {
-        setHtml(data.html_content);
-      }
+      setStructuredMinutes(structured);
+      setHtml(structured?.htmlContent ?? data?.html_content ?? null);
       setChunks(chunks);
       const labels = extractSpeakerLabels(
         parseStringArrayJson(transcription?.speakers),
@@ -264,6 +273,40 @@ export default function Minutes() {
     () => (html ? applySpeakerMapToText(html, speakerMap) : null),
     [html, speakerMap],
   );
+  const structuredEvidencesById = useMemo(
+    () => new Map((structuredMinutes?.evidences ?? []).map((evidence) => [evidence.id, evidence])),
+    [structuredMinutes],
+  );
+  const hasLegacyOnlyMinutes = Boolean(html && !structuredMinutes);
+  const tabs = useMemo(
+    () => [
+      { key: "minutes" as const, label: "Ata", count: 1 },
+      ...(structuredMinutes
+        ? [
+            {
+              key: "decisions" as const,
+              label: "Decisoes",
+              count: structuredMinutes.decisions.length,
+            },
+            {
+              key: "actions" as const,
+              label: "Acoes",
+              count: structuredMinutes.actions.length,
+            },
+            {
+              key: "evidences" as const,
+              label: "Evidencias",
+              count: structuredMinutes.evidences.length,
+            },
+          ]
+        : []),
+      ...(insights.length > 0
+        ? [{ key: "insights" as const, label: "Insights", count: insights.length }]
+        : []),
+      { key: "speakers" as const, label: "Falantes", count: speakerLabels.length },
+    ],
+    [insights.length, speakerLabels.length, structuredMinutes],
+  );
 
   const handleSaveSpeakerMap = async (nextMap: SpeakerMap) => {
     if (!id) return;
@@ -295,11 +338,7 @@ export default function Minutes() {
       </div>
 
       <div className="flex flex-wrap gap-2">
-        {[
-          { key: "minutes" as const, label: "Ata", count: 1 },
-          { key: "insights" as const, label: "Insights", count: insights.length },
-          { key: "speakers" as const, label: "Falantes", count: speakerLabels.length },
-        ].map((tab) => {
+        {tabs.map((tab) => {
           const selected = activeTab === tab.key;
           return (
             <button
@@ -327,9 +366,29 @@ export default function Minutes() {
       </div>
 
       {activeTab === "minutes" ? (
-        <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm md:p-8">
-          <MinutesPreview html={previewHtml ?? html} />
+        <div className="space-y-3">
+          {structuredMinutes && <StructuredEvidenceWarning evidences={structuredMinutes.evidences} />}
+          {hasLegacyOnlyMinutes && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">
+              Ata antiga sem estrutura persistida
+            </div>
+          )}
+          <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm md:p-8">
+            <MinutesPreview html={previewHtml ?? html} />
+          </div>
         </div>
+      ) : activeTab === "decisions" && structuredMinutes ? (
+        <StructuredDecisionsPanel
+          decisions={structuredMinutes.decisions}
+          evidencesById={structuredEvidencesById}
+        />
+      ) : activeTab === "actions" && structuredMinutes ? (
+        <StructuredActionsPanel
+          actions={structuredMinutes.actions}
+          evidencesById={structuredEvidencesById}
+        />
+      ) : activeTab === "evidences" && structuredMinutes ? (
+        <StructuredEvidencesPanel evidences={structuredMinutes.evidences} />
       ) : activeTab === "speakers" ? (
         <SpeakerMapPanel labels={speakerLabels} value={speakerMap} onSave={handleSaveSpeakerMap} />
       ) : (

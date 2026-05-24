@@ -1,7 +1,11 @@
 pub mod audio;
+pub mod audio_chunker;
 pub mod db;
 pub mod diarize;
 pub mod generate;
 pub mod keyring;
+pub mod minutes_pipeline;
+pub mod minutes_validator;
 pub mod storage;
 pub mod transcribe;
+pub mod transcription_router;

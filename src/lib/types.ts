@@ -50,6 +50,83 @@ export interface MinutesData {
   created_at: string;
 }
 
+export interface StructuredDecision {
+  id: string;
+  minuteId: string;
+  meetingId: string;
+  itemIndex: number;
+  chunkIndex: number;
+  title: string;
+  owner: string | null;
+  timestampSec: number;
+  evidence: string;
+  evidenceId: string | null;
+  createdAt: string;
+}
+
+export interface StructuredAction {
+  id: string;
+  minuteId: string;
+  meetingId: string;
+  itemIndex: number;
+  chunkIndex: number;
+  task: string;
+  owner: string | null;
+  deadline: string | null;
+  timestampSec: number;
+  evidence: string;
+  evidenceId: string | null;
+  createdAt: string;
+}
+
+export interface StructuredEvidence {
+  id: string;
+  minuteId: string;
+  meetingId: string;
+  parentType: 'decision' | 'action';
+  parentId: string;
+  chunkIndex: number;
+  quote: string;
+  transcriptExcerpt: string | null;
+  validated: boolean;
+  validationScore: number;
+  createdAt: string;
+}
+
+export interface MinuteVersionSummary {
+  id: string;
+  minuteId: string;
+  meetingId: string;
+  versionNo: number;
+  createdAt: string;
+}
+
+export interface StructuredMinutesData {
+  minuteId: string;
+  meetingId: string;
+  htmlContent: string;
+  pdfPath: string | null;
+  modelUsed: string;
+  createdAt: string;
+  decisions: StructuredDecision[];
+  actions: StructuredAction[];
+  evidences: StructuredEvidence[];
+  versions: MinuteVersionSummary[];
+}
+
+export interface ProcessingJob {
+  id: string;
+  meetingId: string;
+  stage: string;
+  status: 'pending' | 'running' | 'done' | 'error';
+  progressPct: number;
+  errorMsg: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface TranscriptionData {
   id: string;
   meeting_id: string;

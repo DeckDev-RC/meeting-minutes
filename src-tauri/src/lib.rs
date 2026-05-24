@@ -105,8 +105,7 @@ fn get_api_keys(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
         stored_string_or_env(&store, "cloudflare_account_id", "CLOUDFLARE_ACCOUNT_ID");
     let cloudflare_api_token =
         stored_secret_or_env(&store, "cloudflare_api_token", "CLOUDFLARE_API_TOKEN");
-    let deepgram_api_key =
-        stored_secret_or_env(&store, "deepgram_api_key", "DEEPGRAM_API_KEY");
+    let deepgram_api_key = stored_secret_or_env(&store, "deepgram_api_key", "DEEPGRAM_API_KEY");
     let transcription_profile = store
         .get("transcription_profile")
         .and_then(|v| v.as_str().map(|s| s.to_string()))
@@ -249,6 +248,8 @@ pub fn run() {
             commands::db::update_meeting_status,
             commands::db::save_processing_chunks,
             commands::db::get_processing_chunks,
+            commands::db::upsert_processing_job,
+            commands::db::get_processing_jobs,
             commands::db::update_processing_chunk_result,
             commands::db::update_processing_chunk_facts,
             commands::db::save_transcription,
@@ -256,6 +257,8 @@ pub fn run() {
             commands::db::save_speaker_map,
             commands::db::save_minutes,
             commands::db::get_minutes_by_meeting,
+            commands::db::get_structured_minutes_by_meeting,
+            commands::db::get_minute_evidences,
             commands::db::delete_meeting,
             commands::storage::resolve_processing_work_dir,
             commands::storage::save_pdf,

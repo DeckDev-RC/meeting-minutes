@@ -8,10 +8,13 @@ import type {
   MeetingMetadata,
   MinutesData,
   MeetingChunkInsights,
+  ProcessingJob,
   ProcessingChunkRecord,
   SilenceRange,
   SmartChunkOptions,
   SpeakerTurn,
+  StructuredEvidence,
+  StructuredMinutesData,
   TranscriptionData,
   TranscriptionSegment,
 } from './types';
@@ -312,6 +315,24 @@ export const getMeetings = () =>
 export const updateMeetingStatus = (id: string, status: string) =>
   invoke<void>('update_meeting_status', { id, status });
 
+export const upsertProcessingJob = (
+  meetingId: string,
+  stage: string,
+  status: ProcessingJob['status'],
+  progressPct: number,
+  errorMsg?: string | null
+) =>
+  invoke<void>('upsert_processing_job', {
+    meetingId,
+    stage,
+    status,
+    progressPct,
+    errorMsg,
+  });
+
+export const getProcessingJobs = (meetingId: string) =>
+  invoke<ProcessingJob[]>('get_processing_jobs', { meetingId });
+
 export const saveTranscription = (meetingId: string, rawWhisper: string, diarized: string, speakers: string) =>
   invoke<void>('save_transcription', { meetingId, rawWhisper, diarized, speakers });
 
@@ -321,11 +342,32 @@ export const getTranscriptionByMeeting = (meetingId: string) =>
 export const saveSpeakerMap = (meetingId: string, speakerMap: Record<string, string>) =>
   invoke<void>('save_speaker_map', { meetingId, speakerMap: JSON.stringify(speakerMap) });
 
-export const saveMinutes = (meetingId: string, htmlContent: string, pdfPath?: string) =>
-  invoke<void>('save_minutes', { meetingId, htmlContent, pdfPath, modelUsed: 'gemini-2.5-flash' });
+export const saveMinutes = (
+  meetingId: string,
+  htmlContent: string,
+  pdfPath?: string,
+  factsJson?: string,
+  diarizedJson?: string,
+  participantNames?: string[]
+) =>
+  invoke<void>('save_minutes', {
+    meetingId,
+    htmlContent,
+    pdfPath,
+    modelUsed: 'gemini-2.5-flash',
+    factsJson,
+    diarizedJson,
+    participantNames,
+  });
 
 export const getMinutesByMeeting = (meetingId: string) =>
   invoke<MinutesData | null>('get_minutes_by_meeting', { meetingId });
+
+export const getStructuredMinutesByMeeting = (meetingId: string) =>
+  invoke<StructuredMinutesData | null>('get_structured_minutes_by_meeting', { meetingId });
+
+export const getMinuteEvidences = (meetingId: string) =>
+  invoke<StructuredEvidence[]>('get_minute_evidences', { meetingId });
 
 export const savePdf = (pdfBytes: number[], suggestedName: string) =>
   invoke<string>('save_pdf', { pdfBytes, suggestedName });

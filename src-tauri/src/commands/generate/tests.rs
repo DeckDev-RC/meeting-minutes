@@ -266,6 +266,74 @@ fn final_minutes_payload_uses_deduplicated_meeting_graph() {
 }
 
 #[test]
+fn meeting_graph_does_not_promote_generic_owners_to_participants() {
+    let diarized = DiarizedResult {
+        speakers: vec!["Falante 1".to_string(), "Falante 2".to_string()],
+        segments: vec![],
+    };
+    let insights = vec![MeetingChunkInsights {
+        chunk_index: 0,
+        start_sec: 0.0,
+        end_sec: 60.0,
+        summary: "Equipe revisou a operacao e distribuiu pendencias.".to_string(),
+        topics: vec!["Operacao".to_string()],
+        decisions: vec![
+            MeetingDecision {
+                title: "Priorizar cobranca".to_string(),
+                owner: "Não especificado".to_string(),
+                timestamp_sec: 10.0,
+                evidence: "precisamos priorizar isso".to_string(),
+            },
+            MeetingDecision {
+                title: "Caio valida fluxo".to_string(),
+                owner: "Caio".to_string(),
+                timestamp_sec: 20.0,
+                evidence: "Caio vai validar".to_string(),
+            },
+        ],
+        actions: vec![
+            MeetingAction {
+                task: "Acionar vendas".to_string(),
+                owner: "Equipe de Marketing/Vendas".to_string(),
+                deadline: "sexta".to_string(),
+                timestamp_sec: 30.0,
+                evidence: "marketing e vendas cuidam".to_string(),
+            },
+            MeetingAction {
+                task: "Revisar conciliacao".to_string(),
+                owner: "Financeiro".to_string(),
+                deadline: "segunda".to_string(),
+                timestamp_sec: 40.0,
+                evidence: "financeiro revisa".to_string(),
+            },
+            MeetingAction {
+                task: "Enviar resumo".to_string(),
+                owner: "Maria Eduarda, Gabriel".to_string(),
+                deadline: "hoje".to_string(),
+                timestamp_sec: 50.0,
+                evidence: "Maria Eduarda e Gabriel enviam".to_string(),
+            },
+            MeetingAction {
+                task: "Confirmar aprovacao".to_string(),
+                owner: "[Implicit], Aprovador, N/A".to_string(),
+                deadline: "amanha".to_string(),
+                timestamp_sec: 55.0,
+                evidence: "aguardar aprovacao".to_string(),
+            },
+        ],
+        questions: vec![],
+        risks: vec![],
+    }];
+
+    let graph = build_minutes_fact_graph(&diarized, &insights, &[]);
+
+    assert_eq!(
+        graph.participants,
+        vec!["Falante 1", "Falante 2", "Caio", "Maria Eduarda", "Gabriel"]
+    );
+}
+
+#[test]
 fn low_quality_minutes_detection_rejects_placeholders_and_missing_actions() {
     let insights = vec![MeetingChunkInsights {
         chunk_index: 0,
