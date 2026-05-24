@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS minute_versions (
     facts_json TEXT,
     diarized_json TEXT,
     participant_names_json TEXT,
+    change_reason TEXT,
+    snapshot_json TEXT,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_minute_versions_meeting ON minute_versions (meeting_id, created_at);
@@ -84,6 +86,9 @@ CREATE TABLE IF NOT EXISTS minute_actions (
     timestamp_sec REAL NOT NULL,
     evidence TEXT NOT NULL,
     evidence_id TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    priority TEXT NOT NULL DEFAULT 'normal',
+    completed_at TEXT,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_minute_actions_meeting ON minute_actions (meeting_id);
@@ -206,6 +211,41 @@ fn transcriptions_has_column(
     Ok(false)
 }
 
+fn table_has_column(
+    conn: &Connection,
+    table_name: &str,
+    column_name: &str,
+) -> Result<bool, rusqlite::Error> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table_name})"))?;
+    let mut rows = stmt.query([])?;
+
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column_name {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn add_table_column_if_missing(
+    conn: &Connection,
+    table_name: &str,
+    column_name: &str,
+    definition: &str,
+) -> Result<(), rusqlite::Error> {
+    if table_has_column(conn, table_name, column_name)? {
+        return Ok(());
+    }
+
+    conn.execute(
+        &format!("ALTER TABLE {table_name} ADD COLUMN {definition}"),
+        [],
+    )?;
+    Ok(())
+}
+
 fn add_transcription_column_if_missing(
     conn: &Connection,
     column_name: &str,
@@ -253,19 +293,43 @@ fn migrate_transcriptions_speaker_map(conn: &Connection) -> Result<(), rusqlite:
 
 fn migrate_structured_minutes_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(STRUCTURED_MINUTES_SCHEMA)?;
-    let mut stmt = conn.prepare("PRAGMA table_info(minute_versions)")?;
-    let columns = stmt
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?;
-    if !columns
-        .iter()
-        .any(|column| column == "participant_names_json")
-    {
-        conn.execute(
-            "ALTER TABLE minute_versions ADD COLUMN participant_names_json TEXT",
-            [],
-        )?;
-    }
+    add_table_column_if_missing(
+        conn,
+        "minutes",
+        "user_edited",
+        "user_edited INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_table_column_if_missing(
+        conn,
+        "minute_versions",
+        "participant_names_json",
+        "participant_names_json TEXT",
+    )?;
+    add_table_column_if_missing(
+        conn,
+        "minute_versions",
+        "change_reason",
+        "change_reason TEXT",
+    )?;
+    add_table_column_if_missing(
+        conn,
+        "minute_versions",
+        "snapshot_json",
+        "snapshot_json TEXT",
+    )?;
+    add_table_column_if_missing(
+        conn,
+        "minute_actions",
+        "status",
+        "status TEXT NOT NULL DEFAULT 'pending'",
+    )?;
+    add_table_column_if_missing(
+        conn,
+        "minute_actions",
+        "priority",
+        "priority TEXT NOT NULL DEFAULT 'normal'",
+    )?;
+    add_table_column_if_missing(conn, "minute_actions", "completed_at", "completed_at TEXT")?;
     Ok(())
 }
 
@@ -319,6 +383,7 @@ pub fn init_db(app_data_dir: &std::path::Path) -> Connection {
             html_content TEXT NOT NULL,
             pdf_path TEXT,
             model_used TEXT NOT NULL,
+            user_edited INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS jobs (
@@ -1231,7 +1296,7 @@ fn structured_decisions(
 fn structured_actions(db: &Connection, minute_id: &str) -> Result<Vec<serde_json::Value>, String> {
     let mut stmt = db
         .prepare(
-            "SELECT id, minute_id, meeting_id, item_index, chunk_index, task, owner, deadline, timestamp_sec, evidence, evidence_id, created_at
+            "SELECT id, minute_id, meeting_id, item_index, chunk_index, task, owner, deadline, timestamp_sec, evidence, evidence_id, status, priority, completed_at, created_at
              FROM minute_actions
              WHERE minute_id = ?1
              ORDER BY item_index ASC, created_at ASC",
@@ -1252,7 +1317,10 @@ fn structured_actions(db: &Connection, minute_id: &str) -> Result<Vec<serde_json
                 "timestampSec": row.get::<_, f64>(8)?,
                 "evidence": row.get::<_, String>(9)?,
                 "evidenceId": row.get::<_, Option<String>>(10)?,
-                "createdAt": row.get::<_, String>(11)?,
+                "status": row.get::<_, String>(11)?,
+                "priority": row.get::<_, String>(12)?,
+                "completedAt": row.get::<_, Option<String>>(13)?,
+                "createdAt": row.get::<_, String>(14)?,
             }))
         })
         .map_err(|e| e.to_string())?
@@ -1363,6 +1431,212 @@ fn get_minute_evidences_record(
     minute_evidences_for_minute(db, &minute.id)
 }
 
+struct StoredActionRow {
+    id: String,
+    minute_id: String,
+    meeting_id: String,
+    task: String,
+    owner: Option<String>,
+    deadline: Option<String>,
+    timestamp_sec: f64,
+    evidence: String,
+    status: String,
+    priority: String,
+    completed_at: Option<String>,
+}
+
+fn stored_action_by_id(db: &Connection, action_id: &str) -> Result<StoredActionRow, String> {
+    db.query_row(
+        "SELECT id, minute_id, meeting_id, task, owner, deadline, timestamp_sec, evidence, status, priority, completed_at
+         FROM minute_actions
+         WHERE id = ?1",
+        params![action_id],
+        |row| {
+            Ok(StoredActionRow {
+                id: row.get(0)?,
+                minute_id: row.get(1)?,
+                meeting_id: row.get(2)?,
+                task: row.get(3)?,
+                owner: row.get(4)?,
+                deadline: row.get(5)?,
+                timestamp_sec: row.get(6)?,
+                evidence: row.get(7)?,
+                status: row.get(8)?,
+                priority: row.get(9)?,
+                completed_at: row.get(10)?,
+            })
+        },
+    )
+    .map_err(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => "minute action not found".to_string(),
+        other => other.to_string(),
+    })
+}
+
+fn patch_string(
+    patch: &serde_json::Value,
+    key: &str,
+    current: &str,
+    required: bool,
+) -> Result<String, String> {
+    let Some(value) = patch.get(key) else {
+        return Ok(current.to_string());
+    };
+    let Some(text) = value.as_str() else {
+        return Err(format!("{key} must be a string"));
+    };
+    let text = text.trim();
+    if required && text.is_empty() {
+        return Err(format!("{key} cannot be empty"));
+    }
+    Ok(text.to_string())
+}
+
+fn patch_optional_string(
+    patch: &serde_json::Value,
+    key: &str,
+    current: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(value) = patch.get(key) else {
+        return Ok(current.map(ToOwned::to_owned));
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(text) = value.as_str() else {
+        return Err(format!("{key} must be a string or null"));
+    };
+    let text = text.trim();
+    Ok((!text.is_empty()).then(|| text.to_string()))
+}
+
+fn patch_f64(patch: &serde_json::Value, key: &str, current: f64) -> Result<f64, String> {
+    let Some(value) = patch.get(key) else {
+        return Ok(current);
+    };
+    value
+        .as_f64()
+        .filter(|number| number.is_finite() && *number >= 0.0)
+        .ok_or_else(|| format!("{key} must be a non-negative number"))
+}
+
+fn normalize_action_status(status: &str) -> Result<&str, String> {
+    match status {
+        "pending" | "in_progress" | "done" | "canceled" => Ok(status),
+        _ => Err(format!("invalid action status: {status}")),
+    }
+}
+
+fn normalize_action_priority(priority: &str) -> Result<&str, String> {
+    match priority {
+        "low" | "normal" | "high" => Ok(priority),
+        _ => Err(format!("invalid action priority: {priority}")),
+    }
+}
+
+fn insert_minute_snapshot_version(
+    tx: &rusqlite::Transaction<'_>,
+    minute_id: &str,
+    meeting_id: &str,
+    html_content: &str,
+    reason: &str,
+    snapshot_json: &str,
+    now: &str,
+) -> Result<(), String> {
+    let version_no = next_minute_version_no(tx, meeting_id)?;
+    tx.execute(
+        "INSERT INTO minute_versions
+            (id, minute_id, meeting_id, version_no, html_content, change_reason, snapshot_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            minute_id,
+            meeting_id,
+            version_no,
+            html_content,
+            reason,
+            snapshot_json,
+            now
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn update_minute_action_record(
+    db: &mut Connection,
+    action_id: &str,
+    patch: serde_json::Value,
+    reason: Option<String>,
+) -> Result<(), String> {
+    let action = stored_action_by_id(db, action_id)?;
+    let snapshot = get_structured_minutes_by_meeting_record(db, &action.meeting_id)?
+        .ok_or_else(|| "structured minute not found for action".to_string())?;
+    let snapshot_json = serde_json::to_string(&snapshot).map_err(|e| e.to_string())?;
+    let reason = reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Atualizacao de acao")
+        .to_string();
+
+    let task = patch_string(&patch, "task", &action.task, true)?;
+    let owner = patch_optional_string(&patch, "owner", action.owner.as_deref())?;
+    let deadline = patch_optional_string(&patch, "deadline", action.deadline.as_deref())?;
+    let timestamp_sec = patch_f64(&patch, "timestampSec", action.timestamp_sec)?;
+    let evidence = patch_string(&patch, "evidence", &action.evidence, true)?;
+    let status = patch_string(&patch, "status", &action.status, true)?;
+    let status = normalize_action_status(&status)?.to_string();
+    let priority = patch_string(&patch, "priority", &action.priority, true)?;
+    let priority = normalize_action_priority(&priority)?.to_string();
+    let completed_at =
+        patch_optional_string(&patch, "completedAt", action.completed_at.as_deref())?;
+
+    let tx = db.transaction().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let html_content: String = tx
+        .query_row(
+            "SELECT html_content FROM minutes WHERE id = ?1",
+            params![&action.minute_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    insert_minute_snapshot_version(
+        &tx,
+        &action.minute_id,
+        &action.meeting_id,
+        &html_content,
+        &reason,
+        &snapshot_json,
+        &now,
+    )?;
+    tx.execute(
+        "UPDATE minute_actions
+         SET task = ?1, owner = ?2, deadline = ?3, timestamp_sec = ?4, evidence = ?5,
+             status = ?6, priority = ?7, completed_at = ?8
+         WHERE id = ?9",
+        params![
+            task,
+            owner,
+            deadline,
+            timestamp_sec,
+            evidence,
+            status,
+            priority,
+            completed_at,
+            action.id
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE minutes SET user_edited = 1 WHERE id = ?1",
+        params![&action.minute_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[command]
 pub fn get_structured_minutes_by_meeting(
     state: tauri::State<'_, DbState>,
@@ -1379,6 +1653,17 @@ pub fn get_minute_evidences(
 ) -> Result<Vec<serde_json::Value>, String> {
     let db = state.0.lock().map_err(|e| e.to_string())?;
     get_minute_evidences_record(&db, &meeting_id)
+}
+
+#[command]
+pub fn update_minute_action(
+    state: tauri::State<'_, DbState>,
+    action_id: String,
+    patch: serde_json::Value,
+    reason: Option<String>,
+) -> Result<(), String> {
+    let mut db = state.0.lock().map_err(|e| e.to_string())?;
+    update_minute_action_record(&mut db, &action_id, patch, reason)
 }
 
 #[command]
@@ -1466,6 +1751,16 @@ mod tests {
 
     fn transcription_columns(conn: &Connection) -> HashSet<String> {
         let mut stmt = conn.prepare("PRAGMA table_info(transcriptions)").unwrap();
+        stmt.query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    fn table_columns(conn: &Connection, table: &str) -> HashSet<String> {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
         stmt.query_map([], |row| row.get::<_, String>(1))
             .unwrap()
             .map(Result::unwrap)
@@ -1794,6 +2089,105 @@ mod tests {
         let structured = get_structured_minutes_by_meeting_record(&conn, "meeting-legacy").unwrap();
 
         assert!(structured.is_none());
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn init_db_creates_phase_two_review_columns() {
+        let dir = temp_app_dir("phase-two-columns");
+        let conn = init_db(&dir);
+
+        let minutes = table_columns(&conn, "minutes");
+        let versions = table_columns(&conn, "minute_versions");
+        let actions = table_columns(&conn, "minute_actions");
+
+        assert!(minutes.contains("user_edited"));
+        assert!(versions.contains("change_reason"));
+        assert!(versions.contains("snapshot_json"));
+        assert!(actions.contains("status"));
+        assert!(actions.contains("priority"));
+        assert!(actions.contains("completed_at"));
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn update_minute_action_record_creates_snapshot_and_marks_minute_edited() {
+        let dir = temp_app_dir("phase-two-action-update");
+        let mut conn = init_db(&dir);
+        conn.execute(
+            "INSERT INTO minutes (id, meeting_id, html_content, pdf_path, model_used, created_at)
+             VALUES ('minute-1', 'meeting-1', '<h1>Ata</h1>', NULL, 'gemini', '2026-05-24T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO minute_versions
+                (id, minute_id, meeting_id, version_no, html_content, facts_json, diarized_json, participant_names_json, created_at)
+             VALUES ('version-1', 'minute-1', 'meeting-1', 1, '<h1>Ata</h1>', '[]', '{}', NULL, '2026-05-24T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO minute_actions
+                (id, minute_id, meeting_id, item_index, chunk_index, task, owner, deadline, timestamp_sec, evidence, evidence_id, created_at)
+             VALUES ('action-1', 'minute-1', 'meeting-1', 0, 0, 'Enviar resumo', 'Maria', 'hoje', 7.0, 'Maria envia o resumo', NULL, '2026-05-24T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        update_minute_action_record(
+            &mut conn,
+            "action-1",
+            serde_json::json!({
+                "task": "Enviar resumo revisado",
+                "owner": "Caio",
+                "status": "done",
+                "priority": "high",
+                "completedAt": "2026-05-24T12:00:00Z"
+            }),
+            Some("corrigir responsavel".to_string()),
+        )
+        .unwrap();
+
+        let (task, owner, status, priority, completed_at): (
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT task, owner, status, priority, completed_at FROM minute_actions WHERE id = 'action-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(task, "Enviar resumo revisado");
+        assert_eq!(owner, "Caio");
+        assert_eq!(status, "done");
+        assert_eq!(priority, "high");
+        assert_eq!(completed_at, "2026-05-24T12:00:00Z");
+
+        let user_edited: i64 = conn
+            .query_row(
+                "SELECT user_edited FROM minutes WHERE id = 'minute-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(user_edited, 1);
+        assert_eq!(row_count(&conn, "minute_versions"), 2);
+        let (reason, snapshot): (String, String) = conn
+            .query_row(
+                "SELECT change_reason, snapshot_json FROM minute_versions WHERE version_no = 2",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(reason, "corrigir responsavel");
+        assert!(snapshot.contains("Enviar resumo"));
 
         std::fs::remove_dir_all(dir).ok();
     }

@@ -76,7 +76,21 @@ export interface StructuredAction {
   timestampSec: number;
   evidence: string;
   evidenceId: string | null;
+  status: 'pending' | 'in_progress' | 'done' | 'canceled';
+  priority: 'low' | 'normal' | 'high';
+  completedAt: string | null;
   createdAt: string;
+}
+
+export interface StructuredActionPatch {
+  task?: string;
+  owner?: string | null;
+  deadline?: string | null;
+  timestampSec?: number;
+  evidence?: string;
+  status?: StructuredAction['status'];
+  priority?: StructuredAction['priority'];
+  completedAt?: string | null;
 }
 
 export interface StructuredEvidence {

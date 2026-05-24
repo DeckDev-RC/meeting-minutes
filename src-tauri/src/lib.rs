@@ -259,6 +259,7 @@ pub fn run() {
             commands::db::get_minutes_by_meeting,
             commands::db::get_structured_minutes_by_meeting,
             commands::db::get_minute_evidences,
+            commands::db::update_minute_action,
             commands::db::delete_meeting,
             commands::storage::resolve_processing_work_dir,
             commands::storage::save_pdf,

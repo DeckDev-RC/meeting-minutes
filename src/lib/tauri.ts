@@ -13,6 +13,7 @@ import type {
   SilenceRange,
   SmartChunkOptions,
   SpeakerTurn,
+  StructuredActionPatch,
   StructuredEvidence,
   StructuredMinutesData,
   TranscriptionData,
@@ -368,6 +369,13 @@ export const getStructuredMinutesByMeeting = (meetingId: string) =>
 
 export const getMinuteEvidences = (meetingId: string) =>
   invoke<StructuredEvidence[]>('get_minute_evidences', { meetingId });
+
+export const updateMinuteAction = (
+  actionId: string,
+  patch: StructuredActionPatch,
+  reason?: string
+) =>
+  invoke<void>('update_minute_action', { actionId, patch, reason });
 
 export const savePdf = (pdfBytes: number[], suggestedName: string) =>
   invoke<string>('save_pdf', { pdfBytes, suggestedName });
