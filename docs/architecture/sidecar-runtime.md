@@ -110,7 +110,9 @@ Current persistence scope:
 
 - faster-whisper engine is cached while model/device/compute settings remain the same;
 - diarization function is cached for single-worker requests;
-- parallel diarization still uses the existing per-request worker factory until a dedicated persistent worker pool is benchmarked.
+- parallel diarization uses a persistent worker pool keyed by the normalized worker count. Each worker loads its own diarization function once and reuses it across requests.
+
+If a later request changes the parallel worker count, the old pool is shut down and rebuilt for the new size. This avoids sharing one model instance across threads and keeps the diarization algorithm/output path equivalent to the current backend.
 
 This is not wired into Tauri yet. The next benchmark should compare:
 

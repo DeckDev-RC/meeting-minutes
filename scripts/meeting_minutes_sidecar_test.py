@@ -343,6 +343,84 @@ def test_persistent_diarize_session_reuses_single_worker_model():
     assert second["telemetry"]["diarizeCacheScope"] == "single-worker"
 
 
+def test_persistent_diarize_session_reuses_parallel_worker_pool():
+    loaded = []
+
+    def fake_load_diarize_function():
+        marker = f"model-{len(loaded)}"
+        loaded.append(marker)
+        return marker
+
+    def backend_kwargs(num_speakers=None, min_speakers=None, max_speakers=None, embedding_profile=None):
+        return {
+            "num_speakers": num_speakers,
+            "embedding_profile": embedding_profile,
+        }
+
+    def build_batch_chunk_output(diarize_fn, chunk, fallback_index, kwargs):
+        return {
+            "index": int(chunk.get("index", fallback_index)),
+            "audioPath": chunk["audioPath"],
+            "offsetSec": float(chunk.get("offsetSec", 0.0)),
+            "diarized": {
+                "speakers": ["Falante 1"],
+                "segments": [
+                    {
+                        "speaker": "Falante 1",
+                        "start": 0.0,
+                        "end": 1.0,
+                        "text": diarize_fn,
+                    }
+                ],
+            },
+            "report": {
+                "audioDurationSec": float(chunk.get("durationSec", 1.0)),
+                "profile": {
+                    "embeddingProfile": kwargs["embedding_profile"],
+                    "embeddingCount": 1,
+                    "subsegmentCount": 1,
+                    "speechSegmentCount": 1,
+                    "boundaryRefinementWindowCount": 0,
+                    "timings": {"embeddingSec": 0.1},
+                },
+            },
+        }
+
+    fake_module = SimpleNamespace(
+        load_diarize_function=fake_load_diarize_function,
+        backend_kwargs=backend_kwargs,
+        build_batch_chunk_output=build_batch_chunk_output,
+        dependency_warnings=lambda: [],
+        run_backend_batch_with_diarize=None,
+        run_backend_with_diarize=None,
+    )
+    session = PersistentSidecarSession(diarize_module=fake_module)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        request = {
+            "chunks": [
+                {"index": 0, "audioPath": "a.wav", "offsetSec": 0.0, "durationSec": 1.0},
+                {"index": 1, "audioPath": "b.wav", "offsetSec": 1.0, "durationSec": 1.0},
+                {"index": 2, "audioPath": "c.wav", "offsetSec": 2.0, "durationSec": 1.0},
+                {"index": 3, "audioPath": "d.wav", "offsetSec": 3.0, "durationSec": 1.0},
+            ],
+            "outputDir": tmp,
+            "numThreads": 2,
+            "expectedSpeakers": 1,
+            "embeddingProfile": "balanced",
+        }
+        first = session.handle({"command": "diarize-modern-cpu", "request": request})
+        second = session.handle({"command": "diarize-modern-cpu", "request": request})
+
+    assert first["telemetry"]["diarizePoolCacheHit"] is False
+    assert second["telemetry"]["diarizePoolCacheHit"] is True
+    assert second["telemetry"]["diarizeCacheScope"] == "parallel-worker-pool"
+    assert second["telemetry"]["diarizePoolWorkers"] == 2
+    assert len(loaded) == 2
+    assert second["report"]["maxWorkers"] == 2
+    assert second["report"]["chunkCount"] == 4
+
+
 def test_persistent_server_speaks_json_lines():
     input_stream = StringIO(
         json.dumps({"id": "h", "command": "health"})
@@ -372,5 +450,6 @@ if __name__ == "__main__":
     test_diarize_modern_cpu_request_uses_batch_backend_without_real_model()
     test_persistent_transcribe_session_reuses_engine_for_matching_config()
     test_persistent_diarize_session_reuses_single_worker_model()
+    test_persistent_diarize_session_reuses_parallel_worker_pool()
     test_persistent_server_speaks_json_lines()
     print("ok")

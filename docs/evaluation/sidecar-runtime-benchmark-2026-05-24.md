@@ -111,8 +111,15 @@ Leitura:
 - Na amostra curta, o segundo pedido caiu de ~14-15s para ~9.7s.
 - Isso confirma que a direcao correta e sidecar persistente, nao PyInstaller CLI por chamada.
 
-### Limite Atual
+### Pool Persistente De Diarizacao
 
-O cache de diarizacao persistente foi implementado apenas para `numThreads <= 1`.
+Depois da probe inicial, o prototipo `serve` ganhou um pool persistente para `numThreads > 1`.
 
-Para `numThreads > 1`, o prototipo ainda usa a factory paralela existente por requisicao. O proximo passo, se quisermos ganho real na etapa 3, e criar um pool persistente de workers de diarizacao, cada worker com seu modelo carregado uma vez.
+Comportamento atual:
+
+- `numThreads <= 1`: reutiliza uma unica funcao/modelo de diarizacao;
+- `numThreads > 1`: reutiliza um pool de workers por quantidade normalizada de workers;
+- cada worker carrega sua propria funcao/modelo uma vez;
+- se a quantidade de workers muda, o pool antigo e encerrado e outro e criado.
+
+Isto ainda nao troca o pipeline instalado. O proximo benchmark real deve medir o `serve` persistente com `numThreads > 1` contra o runtime atual usando as reunioes de 3h e 4h46, olhando tempo da etapa 3, estabilidade dos falantes e equivalencia da ata.

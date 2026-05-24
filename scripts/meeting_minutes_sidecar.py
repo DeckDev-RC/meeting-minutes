@@ -1,4 +1,5 @@
 import argparse
+import concurrent.futures
 import importlib
 import importlib.metadata
 import json
@@ -6,6 +7,7 @@ import platform
 import re
 import sys
 import tempfile
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -302,6 +304,172 @@ def diarization_request_options(request):
     }
 
 
+def normalize_diarize_worker_count(module, requested_workers, chunk_count):
+    if hasattr(module, "normalize_max_workers"):
+        return module.normalize_max_workers(requested_workers, chunk_count)
+    if chunk_count <= 0:
+        return 1
+    try:
+        parsed = int(requested_workers)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, min(parsed, chunk_count))
+
+
+def build_diarize_batch_report(module, chunk_outputs, output_dir, safe_workers, wall_clock_sec):
+    output_dir.mkdir(parents=True, exist_ok=True)
+    chunks_path = output_dir / "chunk-diarized-results.json"
+    report_path = output_dir / "diarize-batch-backend-report.json"
+    chunks_path.write_text(json.dumps(chunk_outputs, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    audio_duration_sec = sum(
+        float(chunk["report"].get("audioDurationSec") or 0.0)
+        for chunk in chunk_outputs
+    )
+    speakers = []
+    segment_count = 0
+    for chunk in chunk_outputs:
+        for speaker in chunk["diarized"]["speakers"]:
+            if speaker not in speakers:
+                speakers.append(speaker)
+        segment_count += len(chunk["diarized"]["segments"])
+
+    report = {
+        "backend": "diarize",
+        "model": "diarize-0.1.2",
+        "chunkCount": len(chunk_outputs),
+        "maxWorkers": safe_workers,
+        "audioDurationSec": audio_duration_sec,
+        "wallClockSec": wall_clock_sec,
+        "speakerCount": len(speakers) or 1,
+        "segmentCount": segment_count,
+        "realtimeFactor": wall_clock_sec / audio_duration_sec if audio_duration_sec > 0 else None,
+        "speedX": audio_duration_sec / wall_clock_sec if wall_clock_sec > 0 else None,
+        "outputFiles": [str(report_path), str(chunks_path)],
+    }
+
+    chunk_profiles = [
+        chunk["report"].get("profile")
+        for chunk in chunk_outputs
+        if chunk["report"].get("profile")
+    ]
+    if chunk_profiles:
+        timing_keys = sorted(
+            {
+                key
+                for profile in chunk_profiles
+                for key in profile.get("timings", {}).keys()
+            }
+        )
+        report["profile"] = {
+            "embeddingProfile": chunk_profiles[0].get("embeddingProfile"),
+            "embeddingCount": sum(int(profile.get("embeddingCount") or 0) for profile in chunk_profiles),
+            "subsegmentCount": sum(int(profile.get("subsegmentCount") or 0) for profile in chunk_profiles),
+            "speechSegmentCount": sum(
+                int(profile.get("speechSegmentCount") or 0)
+                for profile in chunk_profiles
+            ),
+            "boundaryRefinementWindowCount": sum(
+                int(profile.get("boundaryRefinementWindowCount") or 0)
+                for profile in chunk_profiles
+            ),
+            "timings": {
+                key: round(
+                    sum(
+                        float(profile.get("timings", {}).get(key) or 0.0)
+                        for profile in chunk_profiles
+                    ),
+                    6,
+                )
+                for key in timing_keys
+            },
+        }
+
+    warnings_fn = getattr(module, "dependency_warnings", None)
+    if warnings_fn is not None:
+        warnings = warnings_fn()
+        if warnings:
+            report["dependencyWarnings"] = warnings
+
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return report
+
+
+class PersistentDiarizeWorkerPool:
+    def __init__(self, module, worker_count):
+        self.module = module
+        self.worker_count = worker_count
+        self.worker_state = threading.local()
+        self.executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=worker_count,
+            initializer=self._initialize_worker,
+        )
+        self._warm_workers()
+
+    def _initialize_worker(self):
+        self.worker_state.diarize_fn = self.module.load_diarize_function()
+
+    def _worker_diarize_fn(self):
+        if not hasattr(self.worker_state, "diarize_fn"):
+            self._initialize_worker()
+        return self.worker_state.diarize_fn
+
+    def _warm_workers(self):
+        if self.worker_count <= 1:
+            return
+        barrier = threading.Barrier(self.worker_count)
+
+        def wait_until_ready():
+            self._worker_diarize_fn()
+            barrier.wait(timeout=300)
+
+        futures = [
+            self.executor.submit(wait_until_ready)
+            for _ in range(self.worker_count)
+        ]
+        for future in futures:
+            future.result()
+
+    def process_chunk(self, item, kwargs):
+        fallback_index, chunk = item
+        return self.module.build_batch_chunk_output(
+            self._worker_diarize_fn(),
+            chunk,
+            fallback_index,
+            kwargs,
+        )
+
+    def run_batch(self, request, options):
+        chunks = request.get("chunks")
+        if not isinstance(chunks, list):
+            raise RuntimeError("diarize-modern-cpu request field 'chunks' must be a JSON array")
+
+        output_dir = default_output_dir("diarize-modern-cpu", request)
+        kwargs = self.module.backend_kwargs(
+            options["expected_speakers"],
+            options["min_speakers"],
+            options["max_speakers"],
+            options["embedding_profile"],
+        )
+        started = time.perf_counter()
+        futures = [
+            self.executor.submit(self.process_chunk, item, kwargs)
+            for item in enumerate(chunks)
+        ]
+        chunk_outputs = [future.result() for future in futures]
+        wall_clock_sec = time.perf_counter() - started
+        return build_diarize_batch_report(
+            self.module,
+            chunk_outputs,
+            output_dir,
+            self.worker_count,
+            wall_clock_sec,
+        )
+
+    def shutdown(self):
+        self.executor.shutdown(wait=True)
+
+
 def run_diarize_with_function(
     module,
     diarize_fn,
@@ -362,6 +530,8 @@ class PersistentSidecarSession:
         self.transcribe_engine = None
         self.transcribe_engine_key = None
         self.diarize_fn = None
+        self.diarize_worker_pool = None
+        self.diarize_worker_pool_size = None
 
     def resolve_transcribe_module(self):
         if self.transcribe_module is None:
@@ -389,6 +559,27 @@ class PersistentSidecarSession:
             self.diarize_fn = module.load_diarize_function()
         return module, self.diarize_fn, cache_hit
 
+    def get_diarize_worker_pool(self, worker_count):
+        module = self.resolve_diarize_module()
+        cache_hit = (
+            self.diarize_worker_pool is not None
+            and self.diarize_worker_pool_size == worker_count
+        )
+        if not cache_hit:
+            self.close_diarize_worker_pool()
+            self.diarize_worker_pool = PersistentDiarizeWorkerPool(module, worker_count)
+            self.diarize_worker_pool_size = worker_count
+        return self.diarize_worker_pool, cache_hit
+
+    def close_diarize_worker_pool(self):
+        if self.diarize_worker_pool is not None:
+            self.diarize_worker_pool.shutdown()
+            self.diarize_worker_pool = None
+            self.diarize_worker_pool_size = None
+
+    def close(self):
+        self.close_diarize_worker_pool()
+
     def run_transcribe_local(self, request):
         started = time.perf_counter()
         module, engine, cache_hit = self.get_transcribe_engine(request)
@@ -402,21 +593,29 @@ class PersistentSidecarSession:
         started = time.perf_counter()
         options = diarization_request_options(request)
         module = self.resolve_diarize_module()
-        if options["num_threads"] <= 1:
+        chunks = request.get("chunks")
+        safe_workers = (
+            normalize_diarize_worker_count(module, options["num_threads"], len(chunks))
+            if isinstance(chunks, list)
+            else 1
+        )
+        if safe_workers <= 1:
             module, diarize_fn, cache_hit = self.get_diarize_function()
             report = run_diarize_with_function(module, diarize_fn, request)
+            cache_scope = "single-worker"
+            pool_cache_hit = None
         else:
-            cache_hit = False
-            report = run_diarize_with_function(
-                module,
-                None,
-                request,
-                diarize_factory=module.load_diarize_function,
-            )
+            pool, pool_cache_hit = self.get_diarize_worker_pool(safe_workers)
+            report = pool.run_batch(request, options)
+            cache_hit = pool_cache_hit
+            cache_scope = "parallel-worker-pool"
         response = build_diarization_response(report, time.perf_counter() - started)
         response["telemetry"]["persistent"] = True
         response["telemetry"]["diarizeCacheHit"] = cache_hit
-        response["telemetry"]["diarizeCacheScope"] = "single-worker" if options["num_threads"] <= 1 else "disabled-for-parallel-workers"
+        response["telemetry"]["diarizeCacheScope"] = cache_scope
+        if pool_cache_hit is not None:
+            response["telemetry"]["diarizePoolCacheHit"] = pool_cache_hit
+            response["telemetry"]["diarizePoolWorkers"] = safe_workers
         return response
 
     def handle(self, envelope):
@@ -434,6 +633,7 @@ class PersistentSidecarSession:
         elif command == "diarize-modern-cpu":
             response = self.run_diarize_modern_cpu(request)
         elif command == "shutdown":
+            self.close()
             response = {"ok": True, "command": "shutdown"}
         else:
             raise RuntimeError(f"Unsupported persistent sidecar command: {command}")
@@ -474,21 +674,24 @@ def run_persistent_server(input_stream=None, output_stream=None, session=None):
     output_stream = output_stream or sys.stdout
     session = session or PersistentSidecarSession()
 
-    for line in input_stream:
-        raw = line.strip()
-        if not raw:
-            continue
-        started = time.perf_counter()
-        envelope = None
-        try:
-            envelope = json.loads(raw)
-            response = session.handle(envelope)
-        except Exception as exc:
-            response = persistent_error_response(envelope or {}, exc, started)
-        write_json_line(output_stream, response)
-        if isinstance(envelope, dict) and envelope.get("command") == "shutdown":
-            return 0
-    return 0
+    try:
+        for line in input_stream:
+            raw = line.strip()
+            if not raw:
+                continue
+            started = time.perf_counter()
+            envelope = None
+            try:
+                envelope = json.loads(raw)
+                response = session.handle(envelope)
+            except Exception as exc:
+                response = persistent_error_response(envelope or {}, exc, started)
+            write_json_line(output_stream, response)
+            if isinstance(envelope, dict) and envelope.get("command") == "shutdown":
+                return 0
+        return 0
+    finally:
+        session.close()
 
 
 def parse_args():
