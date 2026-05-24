@@ -11,8 +11,8 @@ Release artifacts are published by `.github/workflows/release.yml`.
 Create and push a version tag:
 
 ```powershell
-git tag v1.0.2
-git push origin v1.0.2
+git tag v1.0.3
+git push origin v1.0.3
 ```
 
 The workflow builds the Windows MSI/NSIS installers on `windows-2025`, prepares
@@ -45,8 +45,8 @@ You can also run the workflow manually from GitHub Actions and provide a
    With the local target dir used by this repo, the generated files are usually:
 
    ```powershell
-   C:\tmp\cargo-target\release\bundle\msi\Meeting Minutes AI_1.0.2_x64_en-US.msi
-   C:\tmp\cargo-target\release\bundle\nsis\Meeting Minutes AI_1.0.2_x64-setup.exe
+   C:\tmp\cargo-target\release\bundle\msi\Meeting Minutes AI_1.0.3_x64_en-US.msi
+   C:\tmp\cargo-target\release\bundle\nsis\Meeting Minutes AI_1.0.3_x64-setup.exe
    ```
 
 ## Bundled diarization runtime
@@ -67,7 +67,7 @@ machines that need the runtime refreshed without reinstalling the whole app:
 
 ```powershell
 npm run runtime:diarize:pack
-npm run runtime:diarize:install -- -PackPath "C:\path\meeting-minutes-diarize-runtime-1.0.2-windows-x64.zip"
+npm run runtime:diarize:install -- -PackPath "C:\path\meeting-minutes-diarize-runtime-1.0.3-windows-x64.zip"
 ```
 
 The app resolves the bundled runtime first through the Tauri resource directory,
@@ -81,8 +81,8 @@ extensions with Git LFS. The LFS patterns are already declared in
 
 ```powershell
 git lfs install
-git add -f "executaveis/Meeting Minutes AI_1.0.2_x64_en-US.msi"
-git add -f "executaveis/Meeting Minutes AI_1.0.2_x64-setup.exe"
+git add -f "executaveis/Meeting Minutes AI_1.0.3_x64_en-US.msi"
+git add -f "executaveis/Meeting Minutes AI_1.0.3_x64-setup.exe"
 ```
 
 Do not store generated binaries directly in regular Git commits.

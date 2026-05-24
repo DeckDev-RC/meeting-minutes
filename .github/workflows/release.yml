@@ -42,6 +42,12 @@ jobs:
       - name: Prepare diarization runtime
         run: npm run setup:diarize-cpu
 
+      - name: Run release smoke checks
+        run: |
+          npm run test:runtime-pack
+          npm run build
+          cargo test --manifest-path src-tauri/Cargo.toml
+
       - name: Prepare FFmpeg sidecar
         shell: pwsh
         run: |
