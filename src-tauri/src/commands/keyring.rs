@@ -72,10 +72,7 @@ pub fn set_api_secret(name: String, value: String) -> Result<(), String> {
 pub fn list_api_secret_status() -> Result<ApiSecretStatus, String> {
     let configured = SECRET_NAMES
         .iter()
-        .map(|name| {
-            get_api_secret_value(name)
-                .map(|value| ((*name).to_string(), value.is_some()))
-        })
+        .map(|name| get_api_secret_value(name).map(|value| ((*name).to_string(), value.is_some())))
         .collect::<Result<BTreeMap<_, _>, _>>()?;
 
     Ok(ApiSecretStatus { configured })

@@ -35,9 +35,7 @@ fn configured_gemini_thinking_budget() -> Option<i32> {
         .and_then(|value| value.trim().parse::<i32>().ok())
 }
 
-pub(super) fn apply_gemini_thinking_config(
-    mut config: serde_json::Value,
-) -> serde_json::Value {
+pub(super) fn apply_gemini_thinking_config(mut config: serde_json::Value) -> serde_json::Value {
     if let Some(budget) = configured_gemini_thinking_budget() {
         config["thinkingConfig"] = serde_json::json!({ "thinkingBudget": budget });
     }
