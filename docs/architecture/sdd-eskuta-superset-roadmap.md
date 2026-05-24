@@ -8,7 +8,7 @@
 - `docs/superpowers/plans/2026-05-23-structured-minutes-and-processing-jobs.md`
 - `docs/evaluation/*benchmark*.md`
 
-**Decisão desta revisão:** este SDD não autoriza reescrever o motor. Ele define uma evolução incremental que preserva o pico atual do Groq, mantém Cloudflare/Deepgram/local como estratégia adaptativa e só troca runtime/sidecar depois de benchmark comparável em reuniões reais.
+**Decisão desta revisão:** este SDD não autoriza reescrever o motor. Ele define uma evolução incremental que preserva o pico atual do Groq, mantém Cloudflare/Deepgram/local como estratégia adaptativa e mantém o runtime atual como padrão. O sidecar foi benchmarkado e reprovado como substituto de runtime.
 
 ## 1. Objetivo
 
@@ -21,7 +21,7 @@ Transformar o `meeting-minutes` em uma solução superior ao Eskuta em todos os 
 5. Empacotamento para usuário comum.
 6. Testes, benchmarks e gates contra regressão.
 
-O produto atual já vence no motor prático: provedores cloud/local, fallback adaptativo, diarização local otimizada, benchmarks reais e instalador funcional. O Eskuta ainda vence em schema, separação de módulos, sidecar e modelo de dados. Este SDD fecha essa diferença sem trocar o que já funciona.
+O produto atual já vence no motor prático: provedores cloud/local, fallback adaptativo, diarização local otimizada, benchmarks reais e instalador funcional. O Eskuta ainda vence em schema, separação de módulos e modelo de dados. O sidecar foi avaliado e não entra mais como meta de runtime. Este SDD fecha essa diferença sem trocar o que já funciona.
 
 ## 2. Definição De "Superar O Eskuta"
 
@@ -34,7 +34,7 @@ O produto atual já vence no motor prático: provedores cloud/local, fallback ad
 | Dados | Tabelas normalizadas | Tabelas normalizadas + compatibilidade com HTML legado |
 | Progresso | Status por pipeline | `processing_jobs`, logs, tempos, retomada e diagnóstico |
 | UI | Abas básicas | Revisão completa, edição, versão, speaker map, evidências |
-| Empacotamento | Sidecar PyInstaller planejado | Instalador único com runtime validado por benchmark |
+| Empacotamento | Sidecar PyInstaller planejado | Instalador único com runtime atual validado por benchmark |
 | Qualidade | Pytest/Vitest | Rust tests, TS build, Playwright, benchmarks E2E e bundle smoke |
 
 O critério final é: tudo que o Eskuta faz bem precisa existir no `meeting-minutes`, mas preservando os diferenciais atuais de velocidade, custo, fallback e qualidade real em reuniões longas.
@@ -45,7 +45,7 @@ O critério final é: tudo que o Eskuta faz bem precisa existir no `meeting-minu
 2. **HTML deixa de ser fonte primária.** HTML/PDF passam a ser renderizações de dados estruturados.
 3. **Toda afirmação importante precisa de evidência.** Decisões e ações sem evidência ficam marcadas como fracas ou pendentes, não como fato confiável.
 4. **Migração compatível.** Bases antigas continuam abrindo; atas antigas continuam visíveis.
-5. **Sidecar só substitui runtime atual com benchmark.** Empacotamento elegante não pode piorar tempo, qualidade ou confiabilidade.
+5. **Runtime atual permanece padrão.** Sidecar foi reprovado nos benchmarks e não é mais candidato de substituição.
 6. **Arquivos grandes devem encolher por responsabilidade, não por extração cega.**
 7. **Tudo deve ser mensurável.** Cada fase tem testes e critérios objetivos.
 
@@ -105,7 +105,7 @@ Ainda falta:
 - edição/versionamento real;
 - diagnóstico visual de jobs;
 - refatoração profunda de `db.rs`, `generate.rs`, `Processing.tsx`;
-- sidecar único com benchmark de paridade.
+- smoke de instalador/runtime em máquina limpa.
 
 ## 6. Arquitetura Alvo
 
@@ -203,7 +203,7 @@ src/pages/minutes/
 | 1. Ata estruturada visível | Schema e evidências mais acionáveis | UI consome tabelas `minute_*` | Ata, decisões, ações e evidências abrem sem parse de HTML |
 | 2. Edição/versionamento | Histórico e revisão humana | Patches transacionais + `minute_versions` | Editar, recarregar e restaurar sem perda |
 | 3. Refatoração profunda | Organização superior | módulos pequenos por domínio | mesmos testes passam e arquivos grandes caem abaixo do alvo |
-| 4. Sidecar/runtime | distribuição limpa | sidecar experimental validado | máquina limpa roda sem Python externo e sem regressão |
+| 4. Runtime e entrega | distribuição limpa | instalador único com runtime atual validado | máquina limpa roda sem Python externo e sem regressão |
 
 As fases são sequenciais para produto, mas a Fase 3 pode avançar em cortes pequenos entre Fase 1 e Fase 2 se o corte não mudar comportamento.
 
@@ -427,106 +427,82 @@ npx playwright test tests/e2e/minutes-insights.spec.ts --project=chromium-deskto
 - Mudança de provedores.
 - Mudança de banco.
 
-## 11. Fase 4 - Sidecar Único Com Benchmark
+## 11. Fase 4 - Runtime Atual E Entrega Validada
 
 ### 11.1 Objetivo
 
-Ter instalador único para usuário comum, mas com runtime mais limpo que o bundle de venv atual, sem perder performance.
+Ter instalador único para usuário comum, mantendo o runtime atual que já passou pelos benchmarks, sem depender de Python externo, diretório do projeto ou configuração manual.
 
 ### 11.2 Estratégia
 
-Criar sidecar experimental:
+Manter o bundle atual de runtime de diarização como caminho oficial:
 
 ```text
-meeting-minutes-sidecar.exe
-  command: transcribe-local
-  command: diarize-modern-cpu
-  command: health
+instalador Windows
+  app Tauri
+  FFmpeg sidecar
+  runtime .venv-diarize empacotado como recurso
+  scripts/diarize_cpu_backend.py
 ```
 
-Contrato CLI:
+O sidecar PyInstaller e o sidecar persistente foram testados e não substituem o runtime atual. Eles podem permanecer no repositório apenas como artefatos de investigação/benchmark, sem virar fluxo de produto.
 
-```powershell
-meeting-minutes-sidecar.exe diarize-modern-cpu --input request.json --output result.json
-meeting-minutes-sidecar.exe transcribe-local --input request.json --output result.json
-meeting-minutes-sidecar.exe health
-```
+### 11.3 Evidência Da Decisão
 
-### 11.3 Request/Response
+Relatórios relevantes:
 
-`diarize-modern-cpu` request:
+- `docs/evaluation/sidecar-runtime-benchmark-2026-05-24.md`
+- `docs/evaluation/diarization-runtime-benchmark-2026-05-23.md`
+- `docs/release.md`
 
-```json
-{
-  "audioPath": "C:/path/audio.wav",
-  "chunks": [],
-  "expectedSpeakers": 4,
-  "numThreads": 6,
-  "mode": "chunked"
-}
-```
+Resultado consolidado:
 
-Response:
+- PyInstaller CLI por chamada piorou startup/tempo externo.
+- Sidecar persistente funcionou tecnicamente, mas não superou o backend atual no caso real de 31 chunks.
+- Backend atual direto: `305.49s`, `36.23x`.
+- Sidecar persistente warm: `312.74s`, `35.39x`.
+- Saída equivalente no benchmark, mas sem ganho de velocidade.
 
-```json
-{
-  "ok": true,
-  "turns": [{ "start": 0.0, "end": 4.2, "speakerIndex": 0 }],
-  "telemetry": {
-    "wallClockSec": 42.1,
-    "backend": "sidecar-modern-cpu",
-    "modelLoadSec": 3.2
-  }
-}
-```
+Conclusão: sidecar não é pendência da Fase 4.
 
-### 11.4 Benchmark Obrigatório
+### 11.4 Validação Obrigatória
 
-Comparar:
+Validar o runtime atual empacotado:
 
-1. runtime atual bundled venv;
-2. sidecar PyInstaller;
-3. sidecar em modo one-folder, se one-file for lento;
-4. fallback atual.
-
-Amostras:
-
-- reunião curta/problemática;
-- reunião de 3h;
-- reunião de 4h46;
-- amostra 10-20 min.
+1. build local Tauri;
+2. GitHub Release ou build em runner limpo;
+3. instalação em máquina sem Python de desenvolvimento;
+4. processamento smoke de áudio curto;
+5. processamento real de 3h reaproveitando o perfil atual;
+6. verificação de que o app não resolve runtime pelo diretório do projeto.
 
 Métricas:
 
 - tempo total;
 - tempo de preparação;
-- tempo transcrição;
-- tempo diarização;
-- tempo geração da ata;
+- tempo de transcrição;
+- tempo de diarização;
+- tempo de geração da ata;
 - número de falantes;
-- decisões/ações/riscos/perguntas;
-- evidências verificadas;
+- decisões/ações/evidências;
 - tamanho do instalador;
-- tempo de primeira execução.
+- logs de resolução do runtime.
 
-### 11.5 Critérios De Troca
+### 11.5 Critérios De Aceite
 
-Sidecar vira padrão somente se:
-
-- tempo total não piorar mais que 5%;
-- qualidade de falantes equivalente;
-- decisões/ações não caírem mais que margem aceitável;
-- evidências verificadas não piorarem;
-- instalador for mais simples ou menor;
-- app instalado funcionar em máquina limpa sem Python.
-
-Se falhar, manter runtime atual e documentar causa.
+- instalador inclui o runtime de diarização;
+- app instalado roda em máquina limpa sem Python externo;
+- runtime é resolvido pelo recurso Tauri antes de qualquer caminho de desenvolvimento;
+- benchmarks de smoke não pioram frente ao baseline documentado;
+- executáveis são publicados por GitHub Releases ou LFS, não por Git normal;
+- Groq, Cloudflare, Deepgram e local continuam disponíveis conforme configuração.
 
 ### 11.6 Fora De Escopo Nesta Fase
 
-- Tornar sidecar padrão sem matriz de benchmark.
+- Tornar sidecar padrão.
+- Retomar PyInstaller como runtime do produto.
 - Exigir instalação manual de Python/modelos.
-- Remover o runtime atual antes de paridade comprovada.
+- Remover o runtime atual.
 
 ## 12. Migração, Rollback E Compatibilidade
 
@@ -623,7 +599,7 @@ Bloquear merge/build se:
 | 1 | UI abre ata estruturada, evidências e fallback legado; Rust, TS e Playwright passam |
 | 2 | edição gera versão, restore funciona, HTML/PDF refletem versão ativa |
 | 3 | arquivos-alvo abaixo do limite, sem mudança perceptível no app instalado |
-| 4 | sidecar passa benchmark, app roda em máquina limpa, runtime antigo ainda é fallback |
+| 4 | instalador único inclui runtime atual, app roda em máquina limpa, sem dependência do diretório do projeto |
 
 ## 17. Riscos
 
@@ -631,12 +607,12 @@ Bloquear merge/build se:
 | --- | --- |
 | Migração DB quebrar base existente | testes com DB legado e `CREATE TABLE IF NOT EXISTS` |
 | UI estruturada divergir do HTML | renderizar HTML a partir do mesmo `StructuredMinutes` |
-| Sidecar piorar startup | benchmark one-file vs one-folder |
+| Runtime empacotado não resolver em máquina limpa | smoke de instalação e logs de resolução do runtime |
 | Refactor quebrar pipeline longo | cortes pequenos e Playwright smoke |
 | Evidência fuzzy aceitar falso positivo | mostrar score e permitir revisão manual |
 | Arquivos continuarem grandes | metas de linha por fase e bloqueio por revisão |
 | Baseline ficar obsoleto | renovar benchmark quando mudar versão do app, modelo ou runtime |
-| Sidecar one-file atrasar primeira execução | comparar one-file e one-folder antes de escolher bundle |
+| Instalador crescer além do aceitável | publicar por GitHub Releases/LFS e monitorar tamanho por versão |
 
 ## 18. Ordem De Execução Recomendada
 
@@ -663,12 +639,13 @@ Bloquear merge/build se:
 3. Quebrar `Processing.tsx`.
 4. Revalidar smoke e build.
 
-### Sprint D - Sidecar
+### Sprint D - Runtime E Entrega
 
-1. Criar sidecar experimental.
-2. Empacotar em build alternativo.
-3. Rodar matriz de benchmark.
-4. Decidir default com dados.
+1. Validar staging do runtime atual no build Tauri.
+2. Rodar smoke em instalação limpa.
+3. Confirmar que o app não depende do diretório do projeto.
+4. Publicar executáveis por GitHub Releases ou LFS.
+5. Documentar sidecar como caminho reprovado, não como pendência.
 
 ## 19. Entrega Final Esperada
 
@@ -679,7 +656,7 @@ Ao concluir as 4 fases:
 - usuário consegue editar e restaurar versões;
 - diagnóstico mostra gargalo e erro por etapa;
 - código fica modular;
-- runtime é instalador único e validado por benchmark;
+- runtime atual é empacotado no instalador único e validado por benchmark;
 - Groq continua disponível no auge dele;
 - Cloudflare/Deepgram/local continuam como estratégia adaptativa;
 - o projeto supera o Eskuta em motor, arquitetura, UX e distribuição.

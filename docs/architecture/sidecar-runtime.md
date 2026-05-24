@@ -1,8 +1,10 @@
-# Sidecar Runtime Strategy
+# Rejected Sidecar Runtime Investigation
 
 ## Decision
 
 The installed app should remain a single installer for regular users. The user should not install Python, create virtual environments, or download model assets manually.
+
+The runtime path stays as the current bundled diarization runtime. PyInstaller CLI sidecar and persistent sidecar were benchmarked and rejected as runtime replacements on 2026-05-24. They remain only as investigation artifacts.
 
 ## Current Runtime
 
@@ -14,28 +16,22 @@ The installed app should remain a single installer for regular users. The user s
 
 This is heavier than a small sidecar executable, but it has one important advantage: it already works in the installed app and keeps model/runtime behavior identical to the benchmarked local setup.
 
-## Eskuta-Inspired Target
+## Investigation Result
 
-Eskuta uses a PyInstaller sidecar. That is the right long-term packaging shape for us too, but only after benchmark parity:
+Eskuta uses a PyInstaller sidecar, but benchmark data did not justify copying that runtime shape for `meeting-minutes`.
 
-1. Build a sidecar executable that exposes the same diarization and local ASR commands used today.
-2. Run the current 3h and 4h46 benchmark meetings against bundled-venv and sidecar modes.
-3. Compare:
-   - total wall time;
-   - diarization stage time;
-   - speaker count stability;
-   - action/decision/evidence counts;
-   - installer size;
-   - first-run startup time.
-4. Switch the default only if quality is equivalent and startup/runtime cost does not regress.
+Measured outcome:
 
-## Why Not Switch Immediately
+- PyInstaller `onefile` adds extraction/startup cost on every call.
+- PyInstaller `onedir` was functional but slower in measured diarization/transcription samples.
+- Persistent source sidecar reused models correctly, but did not beat the current backend on the 31 chunk real meeting.
+- Current bundled runtime remains faster and simpler operationally for the app.
 
-PyInstaller can change startup time, import resolution, model file lookup, and native library loading. For this app, runtime behavior is more important than bundle elegance. The current bundled runtime stays until a sidecar build proves parity.
+Therefore sidecar is not a Phase 4 target and must not become the default runtime.
 
-## Experimental Sidecar Contract
+## Archived Experimental Contract
 
-The Phase 4 experimental entrypoint is:
+The experimental entrypoint used during the investigation was:
 
 ```powershell
 python scripts\meeting_minutes_sidecar.py health
@@ -50,7 +46,7 @@ Build command:
 npm run sidecar:build
 ```
 
-The sidecar is not the default runtime. It is only a benchmark candidate until it beats or matches the bundled runtime matrix.
+The sidecar is not the default runtime and is no longer a benchmark candidate for Phase 4. Keep this contract only for reproducing historical benchmark results.
 
 `diarize-modern-cpu` response includes the SDD turn contract:
 
@@ -82,7 +78,7 @@ The sidecar is not the default runtime. It is only a benchmark candidate until i
 }
 ```
 
-## Persistent Sidecar Investigation
+## Persistent Sidecar Outcome
 
 The first PyInstaller benchmark showed that one process per command is the wrong shape for heavy local ML runtimes:
 
@@ -90,7 +86,7 @@ The first PyInstaller benchmark showed that one process per command is the wrong
 - `onedir` avoids extraction but still showed runtime regressions in the measured samples;
 - the source Python wrapper is already near parity with the current backend.
 
-The experimental `serve` command is the next candidate:
+The experimental `serve` command was tested:
 
 ```powershell
 python scripts\meeting_minutes_sidecar.py serve
@@ -106,7 +102,7 @@ It speaks newline-delimited JSON on stdin/stdout:
 
 Each response is one JSON line and carries the same `id`.
 
-Current persistence scope:
+Implemented persistence scope:
 
 - faster-whisper engine is cached while model/device/compute settings remain the same;
 - diarization function is cached for single-worker requests;
@@ -114,12 +110,7 @@ Current persistence scope:
 
 If a later request changes the parallel worker count, the old pool is shut down and rebuilt for the new size. This avoids sharing one model instance across threads and keeps the diarization algorithm/output path equivalent to the current backend.
 
-This is not wired into Tauri yet. The next benchmark should compare:
-
-1. current backend process per stage;
-2. PyInstaller CLI per stage;
-3. persistent source sidecar;
-4. persistent PyInstaller `onedir`.
+This is not wired into Tauri and should not be wired as a runtime replacement. The real 31 chunk benchmark showed `312.74s` warm persistent sidecar versus `305.49s` current backend.
 
 ## Boundary Modules Added
 

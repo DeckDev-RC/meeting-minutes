@@ -2,14 +2,14 @@
 
 ## Contexto
 
-Objetivo: medir o sidecar experimental da Fase 4 contra o runtime atual antes de qualquer troca no pipeline instalado.
+Objetivo: medir o sidecar experimental, que era candidato da Fase 4, contra o runtime atual antes de qualquer troca no pipeline instalado.
 
 O runtime atual usa ambientes separados:
 
 - `.venv-diarize`: `diarize`, `torch`, `torchaudio`, `silero-vad`, `wespeakerruntime`.
 - `.venv-transcribe`: `faster-whisper`, `ctranslate2`.
 
-Por isso, a matriz validou dois perfis PyInstaller separados (`diarize` e `transcribe`). Um sidecar unico `full` ainda exige ambiente combinado antes de virar candidato final.
+Por isso, a matriz validou dois perfis PyInstaller separados (`diarize` e `transcribe`). Depois das medições, o sidecar deixou de ser candidato de produto e não há plano para criar um perfil `full`.
 
 Artefatos brutos: `benchmarks/runs/sidecar-runtime-20260524`.
 
@@ -70,15 +70,14 @@ Observacoes:
 
 O sidecar PyInstaller ainda nao deve substituir o runtime atual.
 
-Decisao recomendada:
+Decisao apos a matriz inicial:
 
 1. Manter o runtime atual como padrao.
-2. Manter o sidecar como experimental/benchmark.
+2. Nao usar sidecar PyInstaller CLI como runtime de produto.
 3. Nao usar `onefile` para chamadas frequentes do pipeline; o custo de startup aparece diretamente na UX.
-4. Se insistirmos em sidecar, preferir `onedir` ou um processo persistente, nao CLI nova por chunk/etapa.
-5. Antes de sidecar unico, criar um ambiente combinado e testar `Profile=full`; ele provavelmente sera maior que os perfis separados e precisa provar paridade.
+4. A unica hipotese ainda nao eliminada naquele momento era processo persistente; ela foi medida depois e tambem nao superou o runtime atual.
 
-O caminho mais promissor para Fase 4 nao e trocar para PyInstaller CLI por chamada. E manter o runtime atual ou criar um sidecar persistente que carrega o modelo uma vez e aceita multiplas requisicoes.
+O caminho correto para Fase 4 nao e trocar para PyInstaller CLI por chamada. A decisao final depois da probe persistente e manter o runtime atual empacotado no instalador.
 
 ## Probe Persistente
 
@@ -109,7 +108,7 @@ Leitura:
 
 - O processo persistente evitou recriar o engine/modelo no segundo pedido.
 - Na amostra curta, o segundo pedido caiu de ~14-15s para ~9.7s.
-- Isso confirma que a direcao correta e sidecar persistente, nao PyInstaller CLI por chamada.
+- Isso confirmou que valia testar sidecar persistente antes de fechar a decisao, mas ainda nao justificava trocar o runtime.
 
 ### Pool Persistente De Diarizacao
 
@@ -122,7 +121,7 @@ Comportamento atual:
 - cada worker carrega sua propria funcao/modelo uma vez;
 - se a quantidade de workers muda, o pool antigo e encerrado e outro e criado.
 
-Isto ainda nao troca o pipeline instalado. O proximo benchmark real deve medir o `serve` persistente com `numThreads > 1` contra o runtime atual usando as reunioes de 3h e 4h46, olhando tempo da etapa 3, estabilidade dos falantes e equivalencia da ata.
+Isto nao troca o pipeline instalado. O benchmark real abaixo fechou a decisao: o `serve` persistente com `numThreads > 1` nao deve substituir o runtime atual.
 
 ## Benchmark Real Do Pool Persistente
 
@@ -151,9 +150,9 @@ Leitura:
 - No caso real de 31 chunks, o warm pool nao superou o backend atual. A diferenca ficou dentro/contra o sidecar: `312.74s` contra `305.49s`.
 - A raiz pratica e que o tempo full e dominado por VAD, embeddings e clustering por chunk. Economizar carga do modelo por worker nao muda suficientemente o custo total quando cada worker processa varios chunks longos.
 
-Decisao:
+Decisao final:
 
 1. Nao trocar o runtime instalado para sidecar persistente agora.
-2. Manter o sidecar persistente como ferramenta experimental/benchmark.
+2. Remover sidecar da Fase 4 como caminho de produto.
 3. O proximo ganho real deve atacar o custo por chunk no backend Python atual: densidade de embeddings, VAD/cache de audio, perfil por duracao e matriz `numThreads`/chunks.
-4. Se o sidecar for retomado, ele deve ser medido por valor operacional mais amplo, nao por velocidade da etapa 3 neste caso: orquestracao, health check, isolamento do runtime e empacotamento.
+4. Manter scripts/artefatos de sidecar apenas para reproducao historica dos benchmarks, sem integrar no Tauri.
