@@ -64,6 +64,13 @@ export interface StructuredDecision {
   createdAt: string;
 }
 
+export interface StructuredDecisionPatch {
+  title?: string;
+  owner?: string | null;
+  timestampSec?: number;
+  evidence?: string;
+}
+
 export interface StructuredAction {
   id: string;
   minuteId: string;
@@ -112,6 +119,8 @@ export interface MinuteVersionSummary {
   minuteId: string;
   meetingId: string;
   versionNo: number;
+  changeReason: string | null;
+  hasSnapshot: boolean;
   createdAt: string;
 }
 
@@ -121,6 +130,8 @@ export interface StructuredMinutesData {
   htmlContent: string;
   pdfPath: string | null;
   modelUsed: string;
+  userEdited: boolean;
+  participantNames: string[];
   createdAt: string;
   decisions: StructuredDecision[];
   actions: StructuredAction[];

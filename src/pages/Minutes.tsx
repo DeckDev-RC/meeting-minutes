@@ -8,7 +8,11 @@ import {
   getProcessingChunks,
   getStructuredMinutesByMeeting,
   getTranscriptionByMeeting,
+  restoreMinuteVersion,
   saveSpeakerMap,
+  updateMinuteAction,
+  updateMinuteDecision,
+  updateMinuteParticipants,
 } from "../lib/tauri";
 import {
   sanitizeMeetingChunkInsights,
@@ -23,6 +27,8 @@ import type {
   MeetingChunkInsights,
   MeetingDecision,
   ProcessingChunkRecord,
+  StructuredActionPatch,
+  StructuredDecisionPatch,
   StructuredMinutesData,
   TranscriptionSegment,
 } from "../lib/types";
@@ -38,9 +44,18 @@ import {
   StructuredDecisionsPanel,
   StructuredEvidencesPanel,
   StructuredEvidenceWarning,
+  StructuredParticipantsPanel,
+  StructuredVersionsPanel,
 } from "./minutes/StructuredMinutesPanels";
 
-type MinutesTab = "minutes" | "decisions" | "actions" | "evidences" | "insights" | "speakers";
+type MinutesTab =
+  | "minutes"
+  | "decisions"
+  | "actions"
+  | "evidences"
+  | "participants"
+  | "insights"
+  | "speakers";
 
 const formatTime = (seconds: number) => {
   const safe = Math.max(0, Math.round(Number.isFinite(seconds) ? seconds : 0));
@@ -138,6 +153,73 @@ const parseStoredSegments = (json: string | null): TranscriptionSegment[] => {
   }
 };
 
+const escapeHtml = (value: string | null | undefined) =>
+  (value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+
+const actionStatusLabel = (status: string) => {
+  switch (status) {
+    case "in_progress":
+      return "Em andamento";
+    case "done":
+      return "Concluida";
+    case "canceled":
+      return "Cancelada";
+    default:
+      return "Pendente";
+  }
+};
+
+const buildActiveMinutesHtml = (
+  baseHtml: string,
+  structured: StructuredMinutesData | null,
+) => {
+  if (!structured?.userEdited) return baseHtml;
+
+  const participants = (structured.participantNames ?? [])
+    .map((name) => `<span>${escapeHtml(name)}</span>`)
+    .join("");
+  const decisions = structured.decisions
+    .map(
+      (decision) => `
+        <li>
+          <strong>${escapeHtml(decision.title)}</strong>
+          <br />
+          <span>${escapeHtml(decision.owner || "Sem responsavel")} - ${escapeHtml(formatTime(decision.timestampSec))}</span>
+          <br />
+          <em>${escapeHtml(decision.evidence)}</em>
+        </li>`,
+    )
+    .join("");
+  const actions = structured.actions
+    .map(
+      (action) => `
+        <li>
+          <strong>${escapeHtml(action.task)}</strong>
+          <br />
+          <span>${escapeHtml(action.owner || "Sem responsavel")} - ${escapeHtml(action.deadline || "Sem prazo")} - ${escapeHtml(actionStatusLabel(action.status))}</span>
+          <br />
+          <em>${escapeHtml(action.evidence)}</em>
+        </li>`,
+    )
+    .join("");
+
+  return `
+    <section>
+      <h2>Revisao estruturada ativa</h2>
+      <p>Esta ata contem revisoes manuais em participantes, decisoes ou acoes. A exportacao usa estes dados ativos.</p>
+      ${participants ? `<h3>Participantes revisados</h3><div class="participants-list">${participants}</div>` : ""}
+      ${decisions ? `<h3>Decisoes revisadas</h3><ul>${decisions}</ul>` : ""}
+      ${actions ? `<h3>Acoes revisadas</h3><ul>${actions}</ul>` : ""}
+      <hr />
+    </section>
+    ${baseHtml}`;
+};
+
 function EvidenceBadge({ validation }: { validation?: EvidenceValidationItem }) {
   if (!validation) return null;
   return (
@@ -208,6 +290,8 @@ export default function Minutes() {
   const [speakerLabels, setSpeakerLabels] = useState<string[]>([]);
   const [speakerMap, setSpeakerMap] = useState<SpeakerMap>({});
   const [activeTab, setActiveTab] = useState<MinutesTab>("minutes");
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [reviewBusy, setReviewBusy] = useState<string | null>(null);
   const title = "Ata de Reuniao";
 
   useEffect(() => {
@@ -269,9 +353,13 @@ export default function Minutes() {
     () => summarizeEvidenceValidation(Array.from(evidenceByChunk.values())),
     [evidenceByChunk],
   );
+  const activeHtml = useMemo(
+    () => (html ? buildActiveMinutesHtml(html, structuredMinutes) : null),
+    [html, structuredMinutes],
+  );
   const previewHtml = useMemo(
-    () => (html ? applySpeakerMapToText(html, speakerMap) : null),
-    [html, speakerMap],
+    () => (activeHtml ? applySpeakerMapToText(activeHtml, speakerMap) : null),
+    [activeHtml, speakerMap],
   );
   const structuredEvidencesById = useMemo(
     () => new Map((structuredMinutes?.evidences ?? []).map((evidence) => [evidence.id, evidence])),
@@ -298,6 +386,11 @@ export default function Minutes() {
               label: "Evidencias",
               count: structuredMinutes.evidences.length,
             },
+            {
+              key: "participants" as const,
+              label: "Participantes",
+              count: (structuredMinutes.participantNames ?? []).length,
+            },
           ]
         : []),
       ...(insights.length > 0
@@ -313,6 +406,66 @@ export default function Minutes() {
     const normalized = normalizeSpeakerMap(speakerLabels, nextMap);
     await saveSpeakerMap(id, normalized);
     setSpeakerMap(normalized);
+  };
+
+  const handleUpdateAction = async (actionId: string, patch: StructuredActionPatch) => {
+    if (!id) return;
+    setReviewBusy(actionId);
+    setReviewError(null);
+    try {
+      await updateMinuteAction(actionId, patch, "Revisao manual da acao");
+      await loadMinutes(id);
+    } catch (err) {
+      setReviewError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setReviewBusy(null);
+    }
+  };
+
+  const handleUpdateDecision = async (decisionId: string, patch: StructuredDecisionPatch) => {
+    if (!id) return;
+    setReviewBusy(decisionId);
+    setReviewError(null);
+    try {
+      await updateMinuteDecision(decisionId, patch, "Revisao manual da decisao");
+      await loadMinutes(id);
+    } catch (err) {
+      setReviewError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setReviewBusy(null);
+    }
+  };
+
+  const handleRestoreVersion = async (versionId: string) => {
+    if (!id) return;
+    setReviewBusy(versionId);
+    setReviewError(null);
+    try {
+      await restoreMinuteVersion(versionId);
+      await loadMinutes(id);
+    } catch (err) {
+      setReviewError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setReviewBusy(null);
+    }
+  };
+
+  const handleUpdateParticipants = async (participantNames: string[]) => {
+    if (!id) return;
+    setReviewBusy("participants");
+    setReviewError(null);
+    try {
+      await updateMinuteParticipants(
+        id,
+        participantNames,
+        "Revisao manual dos participantes",
+      );
+      await loadMinutes(id);
+    } catch (err) {
+      setReviewError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setReviewBusy(null);
+    }
   };
 
   if (!html) {
@@ -336,6 +489,24 @@ export default function Minutes() {
         </div>
         {activeTab === "minutes" && <ExportButton title={title} />}
       </div>
+
+      {structuredMinutes?.userEdited && (
+        <div className="inline-flex w-fit rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700 ring-1 ring-blue-100">
+          Ata editada
+        </div>
+      )}
+
+      {reviewError && (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
+          {reviewError}
+        </div>
+      )}
+
+      {reviewBusy && (
+        <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 text-sm font-medium text-blue-700">
+          Salvando revisao...
+        </div>
+      )}
 
       <div className="flex flex-wrap gap-2">
         {tabs.map((tab) => {
@@ -365,8 +536,16 @@ export default function Minutes() {
         })}
       </div>
 
-      {activeTab === "minutes" ? (
-        <div className="space-y-3">
+      <div
+        className={
+          structuredMinutes
+            ? "grid gap-6 lg:grid-cols-[minmax(0,1fr)_19rem]"
+            : "space-y-6"
+        }
+      >
+        <div className="min-w-0">
+          {activeTab === "minutes" ? (
+            <div className="space-y-3">
           {structuredMinutes && <StructuredEvidenceWarning evidences={structuredMinutes.evidences} />}
           {hasLegacyOnlyMinutes && (
             <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">
@@ -377,18 +556,25 @@ export default function Minutes() {
             <MinutesPreview html={previewHtml ?? html} />
           </div>
         </div>
-      ) : activeTab === "decisions" && structuredMinutes ? (
+          ) : activeTab === "decisions" && structuredMinutes ? (
         <StructuredDecisionsPanel
           decisions={structuredMinutes.decisions}
           evidencesById={structuredEvidencesById}
+          onUpdateDecision={handleUpdateDecision}
         />
       ) : activeTab === "actions" && structuredMinutes ? (
         <StructuredActionsPanel
           actions={structuredMinutes.actions}
           evidencesById={structuredEvidencesById}
+          onUpdateAction={handleUpdateAction}
         />
       ) : activeTab === "evidences" && structuredMinutes ? (
         <StructuredEvidencesPanel evidences={structuredMinutes.evidences} />
+      ) : activeTab === "participants" && structuredMinutes ? (
+        <StructuredParticipantsPanel
+          participantNames={structuredMinutes.participantNames ?? []}
+          onUpdateParticipants={handleUpdateParticipants}
+        />
       ) : activeTab === "speakers" ? (
         <SpeakerMapPanel labels={speakerLabels} value={speakerMap} onSave={handleSaveSpeakerMap} />
       ) : (
@@ -544,7 +730,17 @@ export default function Minutes() {
             </div>
           )}
         </section>
-      )}
+          )}
+        </div>
+        {structuredMinutes && (
+          <aside className="lg:sticky lg:top-6 lg:self-start">
+            <StructuredVersionsPanel
+              versions={structuredMinutes.versions}
+              onRestoreVersion={handleRestoreVersion}
+            />
+          </aside>
+        )}
+      </div>
     </div>
   );
 }

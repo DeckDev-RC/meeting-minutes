@@ -14,6 +14,7 @@ import type {
   SmartChunkOptions,
   SpeakerTurn,
   StructuredActionPatch,
+  StructuredDecisionPatch,
   StructuredEvidence,
   StructuredMinutesData,
   TranscriptionData,
@@ -376,6 +377,34 @@ export const updateMinuteAction = (
   reason?: string
 ) =>
   invoke<void>('update_minute_action', { actionId, patch, reason });
+
+export const updateMinuteDecision = (
+  decisionId: string,
+  patch: StructuredDecisionPatch,
+  reason?: string
+) =>
+  invoke<void>('update_minute_decision', { decisionId, patch, reason });
+
+export const saveMinuteRevision = (
+  meetingId: string,
+  reason?: string,
+  structuredPayload?: StructuredMinutesData
+) =>
+  invoke<string>('save_minute_revision', {
+    meetingId,
+    reason,
+    structuredPayload,
+  });
+
+export const updateMinuteParticipants = (
+  meetingId: string,
+  participantNames: string[],
+  reason?: string
+) =>
+  invoke<void>('update_minute_participants', { meetingId, participantNames, reason });
+
+export const restoreMinuteVersion = (versionId: string) =>
+  invoke<void>('restore_minute_version', { versionId });
 
 export const savePdf = (pdfBytes: number[], suggestedName: string) =>
   invoke<string>('save_pdf', { pdfBytes, suggestedName });
