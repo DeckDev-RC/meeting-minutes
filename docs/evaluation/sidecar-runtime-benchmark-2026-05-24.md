@@ -123,3 +123,37 @@ Comportamento atual:
 - se a quantidade de workers muda, o pool antigo e encerrado e outro e criado.
 
 Isto ainda nao troca o pipeline instalado. O proximo benchmark real deve medir o `serve` persistente com `numThreads > 1` contra o runtime atual usando as reunioes de 3h e 4h46, olhando tempo da etapa 3, estabilidade dos falantes e equivalencia da ata.
+
+## Benchmark Real Do Pool Persistente
+
+Artefatos brutos: `benchmarks/runs/sidecar-persistent-diarization-20260524`.
+
+Amostra disponivel: reuniao real de aproximadamente 3h03, 31 chunks WAV, `numThreads=6`, `embeddingProfile=balanced`.
+
+Nao foi encontrado artefato local reaproveitavel da reuniao de 4h46. O banco instalado em `%APPDATA%/com.agregar.meeting-minutes/db.sqlite` tinha tres processamentos salvos, todos com 31 chunks e `10977.43s` de audio. O benchmark de 4h46 fica bloqueado ate termos novamente os chunks/audio dessa reuniao.
+
+| Modo | Cache | Wall comando | Wall interno | Speed | Chunks | Falantes | Segmentos | Resultado |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| Backend atual direto | n/a | n/a | 305.49s | 36.23x | 31 | 5 | 2157 | ok |
+| Sidecar persistente cold | miss | 318.71s | 317.40s | 34.87x | 31 | 5 | 2157 | ok |
+| Sidecar persistente warm | hit | 312.87s | 312.74s | 35.39x | 31 | 5 | 2157 | ok |
+
+Validacao de equivalencia:
+
+- `chunkCount`, `speakerCount` e `segmentCount` bateram nos tres modos;
+- a estrutura normalizada por chunk (`index`, lista de falantes e quantidade de segmentos) gerou o mesmo hash nos tres modos: `9866f11f43bb16454247de7c3d6eb24f6d9f8f9d76119db87103f23b8d4012da`;
+- portanto nao houve regressao observada na saida do backend de diarizacao.
+
+Leitura:
+
+- O pool persistente funcionou: a segunda chamada veio com `diarizePoolCacheHit=true`.
+- Na probe curta de 2 chunks, o warm pool melhorou a segunda chamada porque o custo de carga do modelo pesa mais.
+- No caso real de 31 chunks, o warm pool nao superou o backend atual. A diferenca ficou dentro/contra o sidecar: `312.74s` contra `305.49s`.
+- A raiz pratica e que o tempo full e dominado por VAD, embeddings e clustering por chunk. Economizar carga do modelo por worker nao muda suficientemente o custo total quando cada worker processa varios chunks longos.
+
+Decisao:
+
+1. Nao trocar o runtime instalado para sidecar persistente agora.
+2. Manter o sidecar persistente como ferramenta experimental/benchmark.
+3. O proximo ganho real deve atacar o custo por chunk no backend Python atual: densidade de embeddings, VAD/cache de audio, perfil por duracao e matriz `numThreads`/chunks.
+4. Se o sidecar for retomado, ele deve ser medido por valor operacional mais amplo, nao por velocidade da etapa 3 neste caso: orquestracao, health check, isolamento do runtime e empacotamento.
