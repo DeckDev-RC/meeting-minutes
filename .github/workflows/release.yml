@@ -42,11 +42,11 @@ jobs:
       - name: Prepare diarization runtime
         run: npm run setup:diarize-cpu
 
-      - name: Run release smoke checks
-        run: |
-          npm run test:runtime-pack
-          npm run build
-          cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Test diarization runtime pack
+        run: npm run test:runtime-pack
+
+      - name: Build frontend
+        run: npm run build
 
       - name: Prepare FFmpeg sidecar
         shell: pwsh
@@ -60,6 +60,9 @@ jobs:
           }
           New-Item -ItemType Directory -Force -Path "src-tauri\binaries" | Out-Null
           Copy-Item -LiteralPath $ffmpeg.FullName -Destination "src-tauri\binaries\ffmpeg-x86_64-pc-windows-msvc.exe" -Force
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
 
       - name: Build and upload release assets
         uses: tauri-apps/tauri-action@v0.6.2

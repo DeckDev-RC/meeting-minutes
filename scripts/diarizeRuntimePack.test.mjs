@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -20,6 +21,7 @@ const outsideTarget = join(tmpDir, "outside-target");
 const resourceDir = join(tmpDir, "resources", "diarize");
 
 const powershell = process.env.POWERSHELL_EXE || "powershell";
+const comparablePath = (value) => realpathSync(value).toLowerCase();
 
 const runPowerShell = (args) => {
   const result = spawnSync(
@@ -115,7 +117,7 @@ assert.ok(existsSync(join(outsideTarget, "sentinel.txt")));
 assert.equal(existsSync(join(installRoot, "stale-link")), false);
 
 const installed = JSON.parse(readFileSync(join(installRoot, "installed-manifest.json"), "utf8"));
-assert.equal(installed.installRoot, installRoot);
+assert.equal(comparablePath(installed.installRoot), comparablePath(installRoot));
 assert.equal(installed.envConfigured, false);
 
 runPowerShell([
