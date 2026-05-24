@@ -52,7 +52,6 @@ fn format_timestamp(timestamp_sec: f64) -> String {
 
 fn format_metadata_date_time(recorded_at: &str) -> Option<(String, String)> {
     let datetime = chrono::DateTime::parse_from_rfc3339(recorded_at).ok()?;
-    let datetime = datetime.with_timezone(&chrono::Local);
     Some((
         datetime.format("%d/%m/%Y").to_string(),
         datetime.format("%H:%M").to_string(),
