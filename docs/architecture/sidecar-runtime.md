@@ -39,6 +39,7 @@ The Phase 4 experimental entrypoint is:
 
 ```powershell
 python scripts\meeting_minutes_sidecar.py health
+python scripts\meeting_minutes_sidecar.py serve
 python scripts\meeting_minutes_sidecar.py transcribe-local --input request.json --output response.json
 python scripts\meeting_minutes_sidecar.py diarize-modern-cpu --input request.json --output response.json
 ```
@@ -80,6 +81,43 @@ The sidecar is not the default runtime. It is only a benchmark candidate until i
   }
 }
 ```
+
+## Persistent Sidecar Investigation
+
+The first PyInstaller benchmark showed that one process per command is the wrong shape for heavy local ML runtimes:
+
+- `onefile` adds extraction/startup cost on every call;
+- `onedir` avoids extraction but still showed runtime regressions in the measured samples;
+- the source Python wrapper is already near parity with the current backend.
+
+The experimental `serve` command is the next candidate:
+
+```powershell
+python scripts\meeting_minutes_sidecar.py serve
+```
+
+It speaks newline-delimited JSON on stdin/stdout:
+
+```json
+{"id":"1","command":"health"}
+{"id":"2","command":"transcribe-local","request":{"audioPath":"sample.flac","outputDir":"out"}}
+{"id":"3","command":"shutdown"}
+```
+
+Each response is one JSON line and carries the same `id`.
+
+Current persistence scope:
+
+- faster-whisper engine is cached while model/device/compute settings remain the same;
+- diarization function is cached for single-worker requests;
+- parallel diarization still uses the existing per-request worker factory until a dedicated persistent worker pool is benchmarked.
+
+This is not wired into Tauri yet. The next benchmark should compare:
+
+1. current backend process per stage;
+2. PyInstaller CLI per stage;
+3. persistent source sidecar;
+4. persistent PyInstaller `onedir`.
 
 ## Boundary Modules Added
 

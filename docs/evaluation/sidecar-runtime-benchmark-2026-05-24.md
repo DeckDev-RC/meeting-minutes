@@ -79,3 +79,40 @@ Decisao recomendada:
 5. Antes de sidecar unico, criar um ambiente combinado e testar `Profile=full`; ele provavelmente sera maior que os perfis separados e precisa provar paridade.
 
 O caminho mais promissor para Fase 4 nao e trocar para PyInstaller CLI por chamada. E manter o runtime atual ou criar um sidecar persistente que carrega o modelo uma vez e aceita multiplas requisicoes.
+
+## Probe Persistente
+
+Depois do benchmark de CLI por chamada, foi criado um prototipo experimental `serve` por JSONL.
+
+Comando base:
+
+```powershell
+python scripts\meeting_minutes_sidecar.py serve
+```
+
+Artefatos brutos: `benchmarks/runs/sidecar-persistent-20260524`.
+
+### Transcricao Local Persistente
+
+Amostra: `benchmarks/runs/cloud-asr-20260522-2026-05-08/xai-probes/probe_30s.flac`.
+
+Ambiente: `.venv-transcribe`, faster-whisper `turbo`, CPU `int8`, `cpuThreads=4`.
+
+Wall externo total do processo: 25.57s para `t1+t2+shutdown`.
+
+| Pedido | Wall interno | Cache | Segmentos | Resultado |
+|---|---:|---|---:|---|
+| `t1` | 15.61s | `engineCacheHit=false` | 1 | ok |
+| `t2` | 9.70s | `engineCacheHit=true` | 1 | ok |
+
+Leitura:
+
+- O processo persistente evitou recriar o engine/modelo no segundo pedido.
+- Na amostra curta, o segundo pedido caiu de ~14-15s para ~9.7s.
+- Isso confirma que a direcao correta e sidecar persistente, nao PyInstaller CLI por chamada.
+
+### Limite Atual
+
+O cache de diarizacao persistente foi implementado apenas para `numThreads <= 1`.
+
+Para `numThreads > 1`, o prototipo ainda usa a factory paralela existente por requisicao. O proximo passo, se quisermos ganho real na etapa 3, e criar um pool persistente de workers de diarizacao, cada worker com seu modelo carregado uma vez.

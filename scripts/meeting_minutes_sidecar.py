@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 SIDECAR_VERSION = "0.1.0"
-COMMANDS = ["health", "transcribe-local", "diarize-modern-cpu"]
+COMMANDS = ["health", "transcribe-local", "diarize-modern-cpu", "serve"]
 
 
 def load_json_object(path):
@@ -118,6 +118,53 @@ def import_backend_module(name):
     return importlib.import_module(name)
 
 
+def transcribe_engine_key(request):
+    return (
+        request.get("model", "turbo"),
+        request.get("device", "auto"),
+        request.get("computeType") or request.get("compute_type") or "auto",
+        optional_int(request.get("cpuThreads") or request.get("cpu_threads"), 0),
+        optional_int(request.get("numWorkers") or request.get("num_workers"), 1),
+        optional_int(request.get("batchSize") or request.get("batch_size"), 8),
+        optional_int(request.get("beamSize") or request.get("beam_size"), 1),
+        request.get("language", "pt"),
+        optional_bool(request.get("vadFilter", request.get("vad_filter", True)), True),
+    )
+
+
+def create_transcribe_engine(module, request):
+    return module.FasterWhisperEngine(
+        model=request.get("model", "turbo"),
+        device=request.get("device", "auto"),
+        compute_type=request.get("computeType") or request.get("compute_type") or "auto",
+        cpu_threads=optional_int(request.get("cpuThreads") or request.get("cpu_threads"), 0),
+        num_workers=optional_int(request.get("numWorkers") or request.get("num_workers"), 1),
+        batch_size=optional_int(request.get("batchSize") or request.get("batch_size"), 8),
+        beam_size=optional_int(request.get("beamSize") or request.get("beam_size"), 1),
+        language=request.get("language", "pt"),
+        vad_filter=optional_bool(request.get("vadFilter", request.get("vad_filter", True)), True),
+    )
+
+
+def run_transcribe_with_engine(module, engine, request, response_path=None):
+    output_dir = default_output_dir("transcribe-local", request, response_path)
+    chunks = request.get("chunks")
+    if chunks:
+        if not isinstance(chunks, list):
+            raise RuntimeError("transcribe-local request field 'chunks' must be a JSON array")
+        return module.run_backend_batch_with_engine(engine, chunks, output_dir)
+
+    audio_path = request.get("audioPath") or request.get("audio_path")
+    if not audio_path:
+        raise RuntimeError("transcribe-local request requires audioPath when chunks is empty")
+    return module.run_backend_with_engine(
+        engine,
+        Path(audio_path),
+        output_dir,
+        offset_sec=optional_float(request.get("offsetSec") or request.get("offset_sec"), 0.0),
+    )
+
+
 def load_transcription_chunk_outputs(report):
     for output_file in report.get("outputFiles", []):
         path = Path(output_file)
@@ -168,35 +215,8 @@ def build_transcription_response(report, command_wall_clock_sec, chunk_outputs=N
 def run_transcribe_local_request(request, response_path=None, backend_module=None):
     module = backend_module or import_backend_module("transcribe_faster_whisper_backend")
     started = time.perf_counter()
-    output_dir = default_output_dir("transcribe-local", request, response_path)
-    engine = module.FasterWhisperEngine(
-        model=request.get("model", "turbo"),
-        device=request.get("device", "auto"),
-        compute_type=request.get("computeType") or request.get("compute_type") or "auto",
-        cpu_threads=optional_int(request.get("cpuThreads") or request.get("cpu_threads"), 0),
-        num_workers=optional_int(request.get("numWorkers") or request.get("num_workers"), 1),
-        batch_size=optional_int(request.get("batchSize") or request.get("batch_size"), 8),
-        beam_size=optional_int(request.get("beamSize") or request.get("beam_size"), 1),
-        language=request.get("language", "pt"),
-        vad_filter=optional_bool(request.get("vadFilter", request.get("vad_filter", True)), True),
-    )
-
-    chunks = request.get("chunks")
-    if chunks:
-        if not isinstance(chunks, list):
-            raise RuntimeError("transcribe-local request field 'chunks' must be a JSON array")
-        report = module.run_backend_batch_with_engine(engine, chunks, output_dir)
-    else:
-        audio_path = request.get("audioPath") or request.get("audio_path")
-        if not audio_path:
-            raise RuntimeError("transcribe-local request requires audioPath when chunks is empty")
-        report = module.run_backend_with_engine(
-            engine,
-            Path(audio_path),
-            output_dir,
-            offset_sec=optional_float(request.get("offsetSec") or request.get("offset_sec"), 0.0),
-        )
-
+    engine = create_transcribe_engine(module, request)
+    report = run_transcribe_with_engine(module, engine, request, response_path=response_path)
     return build_transcription_response(report, time.perf_counter() - started)
 
 
@@ -270,48 +290,157 @@ def build_diarization_response(report, command_wall_clock_sec, chunk_outputs=Non
     }
 
 
-def run_diarize_modern_cpu_request(request, response_path=None, backend_module=None):
-    module = backend_module or import_backend_module("diarize_cpu_backend")
-    started = time.perf_counter()
+def diarization_request_options(request):
+    return {
+        "expected_speakers": optional_int(
+            request.get("expectedSpeakers") or request.get("expected_speakers")
+        ),
+        "num_threads": optional_int(request.get("numThreads") or request.get("num_threads"), 1),
+        "min_speakers": optional_int(request.get("minSpeakers") or request.get("min_speakers")),
+        "max_speakers": optional_int(request.get("maxSpeakers") or request.get("max_speakers")),
+        "embedding_profile": request.get("embeddingProfile") or request.get("embedding_profile"),
+    }
+
+
+def run_diarize_with_function(
+    module,
+    diarize_fn,
+    request,
+    response_path=None,
+    diarize_factory=None,
+):
     output_dir = default_output_dir("diarize-modern-cpu", request, response_path)
-    expected_speakers = optional_int(
-        request.get("expectedSpeakers") or request.get("expected_speakers")
-    )
-    num_threads = optional_int(request.get("numThreads") or request.get("num_threads"), 1)
-    min_speakers = optional_int(request.get("minSpeakers") or request.get("min_speakers"))
-    max_speakers = optional_int(request.get("maxSpeakers") or request.get("max_speakers"))
-    embedding_profile = request.get("embeddingProfile") or request.get("embedding_profile")
+    options = diarization_request_options(request)
 
     chunks = request.get("chunks")
     if chunks:
         if not isinstance(chunks, list):
             raise RuntimeError("diarize-modern-cpu request field 'chunks' must be a JSON array")
-        report = module.run_backend_batch_with_diarize(
-            None,
+        return module.run_backend_batch_with_diarize(
+            diarize_fn,
             chunks,
             output_dir,
-            num_speakers=expected_speakers,
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
-            max_workers=num_threads,
-            diarize_factory=module.load_diarize_function,
-            embedding_profile=embedding_profile,
-        )
-    else:
-        audio_path = request.get("audioPath") or request.get("audio_path")
-        if not audio_path:
-            raise RuntimeError("diarize-modern-cpu request requires audioPath when chunks is empty")
-        report = module.run_backend_with_diarize(
-            module.load_diarize_function(),
-            Path(audio_path),
-            output_dir,
-            num_speakers=expected_speakers,
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
-            embedding_profile=embedding_profile,
+            num_speakers=options["expected_speakers"],
+            min_speakers=options["min_speakers"],
+            max_speakers=options["max_speakers"],
+            max_workers=options["num_threads"],
+            diarize_factory=diarize_factory,
+            embedding_profile=options["embedding_profile"],
         )
 
+    audio_path = request.get("audioPath") or request.get("audio_path")
+    if not audio_path:
+        raise RuntimeError("diarize-modern-cpu request requires audioPath when chunks is empty")
+    return module.run_backend_with_diarize(
+        diarize_fn,
+        Path(audio_path),
+        output_dir,
+        num_speakers=options["expected_speakers"],
+        min_speakers=options["min_speakers"],
+        max_speakers=options["max_speakers"],
+        embedding_profile=options["embedding_profile"],
+    )
+
+
+def run_diarize_modern_cpu_request(request, response_path=None, backend_module=None):
+    module = backend_module or import_backend_module("diarize_cpu_backend")
+    started = time.perf_counter()
+    report = run_diarize_with_function(
+        module,
+        None,
+        request,
+        response_path=response_path,
+        diarize_factory=module.load_diarize_function,
+    )
     return build_diarization_response(report, time.perf_counter() - started)
+
+
+class PersistentSidecarSession:
+    def __init__(self, transcribe_module=None, diarize_module=None):
+        self.transcribe_module = transcribe_module
+        self.diarize_module = diarize_module
+        self.transcribe_engine = None
+        self.transcribe_engine_key = None
+        self.diarize_fn = None
+
+    def resolve_transcribe_module(self):
+        if self.transcribe_module is None:
+            self.transcribe_module = import_backend_module("transcribe_faster_whisper_backend")
+        return self.transcribe_module
+
+    def resolve_diarize_module(self):
+        if self.diarize_module is None:
+            self.diarize_module = import_backend_module("diarize_cpu_backend")
+        return self.diarize_module
+
+    def get_transcribe_engine(self, request):
+        module = self.resolve_transcribe_module()
+        key = transcribe_engine_key(request)
+        cache_hit = self.transcribe_engine is not None and self.transcribe_engine_key == key
+        if not cache_hit:
+            self.transcribe_engine = create_transcribe_engine(module, request)
+            self.transcribe_engine_key = key
+        return module, self.transcribe_engine, cache_hit
+
+    def get_diarize_function(self):
+        module = self.resolve_diarize_module()
+        cache_hit = self.diarize_fn is not None
+        if self.diarize_fn is None:
+            self.diarize_fn = module.load_diarize_function()
+        return module, self.diarize_fn, cache_hit
+
+    def run_transcribe_local(self, request):
+        started = time.perf_counter()
+        module, engine, cache_hit = self.get_transcribe_engine(request)
+        report = run_transcribe_with_engine(module, engine, request)
+        response = build_transcription_response(report, time.perf_counter() - started)
+        response["telemetry"]["persistent"] = True
+        response["telemetry"]["engineCacheHit"] = cache_hit
+        return response
+
+    def run_diarize_modern_cpu(self, request):
+        started = time.perf_counter()
+        options = diarization_request_options(request)
+        module = self.resolve_diarize_module()
+        if options["num_threads"] <= 1:
+            module, diarize_fn, cache_hit = self.get_diarize_function()
+            report = run_diarize_with_function(module, diarize_fn, request)
+        else:
+            cache_hit = False
+            report = run_diarize_with_function(
+                module,
+                None,
+                request,
+                diarize_factory=module.load_diarize_function,
+            )
+        response = build_diarization_response(report, time.perf_counter() - started)
+        response["telemetry"]["persistent"] = True
+        response["telemetry"]["diarizeCacheHit"] = cache_hit
+        response["telemetry"]["diarizeCacheScope"] = "single-worker" if options["num_threads"] <= 1 else "disabled-for-parallel-workers"
+        return response
+
+    def handle(self, envelope):
+        if not isinstance(envelope, dict):
+            raise RuntimeError("Persistent sidecar envelope must be a JSON object")
+        command = envelope.get("command")
+        request = envelope.get("request") or {}
+        if request and not isinstance(request, dict):
+            raise RuntimeError("Persistent sidecar envelope field 'request' must be a JSON object")
+
+        if command == "health":
+            response = command_health()
+        elif command == "transcribe-local":
+            response = self.run_transcribe_local(request)
+        elif command == "diarize-modern-cpu":
+            response = self.run_diarize_modern_cpu(request)
+        elif command == "shutdown":
+            response = {"ok": True, "command": "shutdown"}
+        else:
+            raise RuntimeError(f"Unsupported persistent sidecar command: {command}")
+
+        if "id" in envelope:
+            response["id"] = envelope["id"]
+        return response
 
 
 def error_response(command, exc, started_at):
@@ -327,12 +456,52 @@ def error_response(command, exc, started_at):
     }
 
 
+def persistent_error_response(envelope, exc, started_at):
+    command = envelope.get("command") if isinstance(envelope, dict) else None
+    response = error_response(command or "serve", exc, started_at)
+    if isinstance(envelope, dict) and "id" in envelope:
+        response["id"] = envelope["id"]
+    return response
+
+
+def write_json_line(output_stream, payload):
+    output_stream.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    output_stream.flush()
+
+
+def run_persistent_server(input_stream=None, output_stream=None, session=None):
+    input_stream = input_stream or sys.stdin
+    output_stream = output_stream or sys.stdout
+    session = session or PersistentSidecarSession()
+
+    for line in input_stream:
+        raw = line.strip()
+        if not raw:
+            continue
+        started = time.perf_counter()
+        envelope = None
+        try:
+            envelope = json.loads(raw)
+            response = session.handle(envelope)
+        except Exception as exc:
+            response = persistent_error_response(envelope or {}, exc, started)
+        write_json_line(output_stream, response)
+        if isinstance(envelope, dict) and envelope.get("command") == "shutdown":
+            return 0
+    return 0
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Experimental meeting-minutes sidecar.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     health = subparsers.add_parser("health", help="Print sidecar health and dependency status")
     health.add_argument("--output", help="Optional response JSON path")
+
+    subparsers.add_parser(
+        "serve",
+        help="Run a persistent JSONL sidecar over stdin/stdout",
+    )
 
     for command in ["transcribe-local", "diarize-modern-cpu"]:
         sub = subparsers.add_parser(command, help=f"Run {command} from a JSON request")
@@ -350,6 +519,8 @@ def main():
             response = command_health()
             write_json(args.output, response)
             return 0
+        if args.command == "serve":
+            return run_persistent_server()
 
         request = load_json_object(args.input)
         if args.command == "transcribe-local":

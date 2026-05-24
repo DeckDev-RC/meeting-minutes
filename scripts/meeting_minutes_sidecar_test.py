@@ -1,13 +1,16 @@
 import json
+from io import StringIO
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
 from meeting_minutes_sidecar import (
+    PersistentSidecarSession,
     build_diarization_response,
     build_transcription_response,
     command_health,
     diarized_segments_to_turns,
+    run_persistent_server,
     run_diarize_modern_cpu_request,
     run_transcribe_local_request,
     speaker_label_to_index,
@@ -241,6 +244,123 @@ def test_diarize_modern_cpu_request_uses_batch_backend_without_real_model():
     assert response["telemetry"]["backend"] == "sidecar-modern-cpu"
 
 
+def test_persistent_transcribe_session_reuses_engine_for_matching_config():
+    created_engines = []
+
+    class FakeEngine:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            created_engines.append(self)
+
+    def run_backend_with_engine(engine, audio_path, output_dir, offset_sec=0.0):
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        return {
+            "backend": "faster-whisper",
+            "model": engine.kwargs["model"],
+            "device": "cpu",
+            "computeType": "int8",
+            "audioPath": str(audio_path),
+            "offsetSec": offset_sec,
+            "wallClockSec": 0.5,
+            "segments": [{"id": 0, "start": 0.0, "end": 1.0, "text": "ok"}],
+            "segmentCount": 1,
+            "outputFiles": [],
+        }
+
+    fake_module = SimpleNamespace(
+        FasterWhisperEngine=FakeEngine,
+        run_backend_batch_with_engine=None,
+        run_backend_with_engine=run_backend_with_engine,
+    )
+    session = PersistentSidecarSession(transcribe_module=fake_module)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        request = {
+            "audioPath": "a.flac",
+            "outputDir": tmp,
+            "model": "turbo",
+        }
+        first = session.handle({"id": "one", "command": "transcribe-local", "request": request})
+        second = session.handle({"id": "two", "command": "transcribe-local", "request": request})
+
+    assert len(created_engines) == 1
+    assert first["telemetry"]["engineCacheHit"] is False
+    assert second["telemetry"]["engineCacheHit"] is True
+    assert second["id"] == "two"
+
+
+def test_persistent_diarize_session_reuses_single_worker_model():
+    loaded = []
+
+    def fake_load_diarize_function():
+        marker = object()
+        loaded.append(marker)
+        return marker
+
+    def run_backend_batch_with_diarize(
+        diarize_fn,
+        chunks,
+        output_dir,
+        num_speakers=None,
+        min_speakers=None,
+        max_speakers=None,
+        max_workers=1,
+        diarize_factory=None,
+        embedding_profile=None,
+    ):
+        assert diarize_fn is loaded[0]
+        assert diarize_factory is None
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        return {
+            "backend": "diarize",
+            "model": "diarize-0.1.2",
+            "chunkCount": len(chunks),
+            "wallClockSec": 0.5,
+            "speakerCount": 1,
+            "segmentCount": 0,
+            "outputFiles": [],
+        }
+
+    fake_module = SimpleNamespace(
+        load_diarize_function=fake_load_diarize_function,
+        run_backend_batch_with_diarize=run_backend_batch_with_diarize,
+        run_backend_with_diarize=None,
+    )
+    session = PersistentSidecarSession(diarize_module=fake_module)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        request = {
+            "chunks": [{"index": 0, "audioPath": "a.wav", "offsetSec": 0.0}],
+            "outputDir": tmp,
+            "numThreads": 1,
+        }
+        first = session.handle({"command": "diarize-modern-cpu", "request": request})
+        second = session.handle({"command": "diarize-modern-cpu", "request": request})
+
+    assert len(loaded) == 1
+    assert first["telemetry"]["diarizeCacheHit"] is False
+    assert second["telemetry"]["diarizeCacheHit"] is True
+    assert second["telemetry"]["diarizeCacheScope"] == "single-worker"
+
+
+def test_persistent_server_speaks_json_lines():
+    input_stream = StringIO(
+        json.dumps({"id": "h", "command": "health"})
+        + "\n"
+        + json.dumps({"id": "bye", "command": "shutdown"})
+        + "\n"
+    )
+    output_stream = StringIO()
+
+    exit_code = run_persistent_server(input_stream, output_stream, PersistentSidecarSession())
+    responses = [json.loads(line) for line in output_stream.getvalue().splitlines()]
+
+    assert exit_code == 0
+    assert responses[0]["id"] == "h"
+    assert responses[0]["ok"] is True
+    assert responses[1] == {"ok": True, "command": "shutdown", "id": "bye"}
+
+
 if __name__ == "__main__":
     test_health_contract_is_json_safe()
     test_speaker_labels_convert_to_zero_based_indexes()
@@ -250,4 +370,7 @@ if __name__ == "__main__":
     test_diarization_response_builds_sdd_turn_contract()
     test_transcribe_local_request_uses_batch_backend_without_real_model()
     test_diarize_modern_cpu_request_uses_batch_backend_without_real_model()
+    test_persistent_transcribe_session_reuses_engine_for_matching_config()
+    test_persistent_diarize_session_reuses_single_worker_model()
+    test_persistent_server_speaks_json_lines()
     print("ok")
