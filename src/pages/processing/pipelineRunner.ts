@@ -450,7 +450,9 @@ export const runProcessingPipeline = async (
                 : "Motor CPU moderno ativo nesta reuniao.",
           );
         } else if (speculative.fallbackReason) {
-          setProcessingNote(`Pyannote indisponivel: ${speculative.fallbackReason}`);
+          setProcessingNote(`Motor de falantes indisponivel: ${speculative.fallbackReason}`);
+        } else if (speculative.error) {
+          setProcessingNote(`Motor de falantes indisponivel: ${speculative.error}`);
         }
 
         const warnIfAutoChunkedFragmented = (result: DiarizedResult) => {

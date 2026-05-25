@@ -18,6 +18,7 @@ const extractDir = join(tmpDir, "extract");
 const installRoot = join(tmpDir, "installed");
 const outsideTarget = join(tmpDir, "outside-target");
 const resourceDir = join(tmpDir, "resources", "diarize");
+const pythonHome = join(tmpDir, "python-home");
 
 const powershell = process.env.POWERSHELL_EXE || "powershell";
 
@@ -40,11 +41,26 @@ const runPowerShell = (args) => {
 
 rmSync(tmpDir, { recursive: true, force: true });
 mkdirSync(join(projectRoot, ".venv-diarize", "Scripts"), { recursive: true });
+mkdirSync(join(projectRoot, ".venv-diarize", "Lib", "site-packages"), { recursive: true });
 mkdirSync(join(projectRoot, "scripts"), { recursive: true });
 mkdirSync(outDir, { recursive: true });
+mkdirSync(join(pythonHome, "Lib"), { recursive: true });
+mkdirSync(join(pythonHome, "Lib", "site-packages", "global_pkg"), { recursive: true });
+mkdirSync(join(pythonHome, "Scripts"), { recursive: true });
 
 writeFileSync(join(projectRoot, ".venv-diarize", "Scripts", "python.exe"), "fake python");
-writeFileSync(join(projectRoot, ".venv-diarize", "pyvenv.cfg"), "home = fake");
+writeFileSync(
+  join(projectRoot, ".venv-diarize", "pyvenv.cfg"),
+  `home = ${pythonHome}\nexecutable = ${join(pythonHome, "python.exe")}\n`,
+);
+writeFileSync(join(projectRoot, ".venv-diarize", "Lib", "site-packages", "diarize.pth"), "fake");
+writeFileSync(join(pythonHome, "python.exe"), "fake base python");
+writeFileSync(join(pythonHome, "python311.dll"), "fake base dll");
+writeFileSync(join(pythonHome, "python311.pdb"), "do not copy");
+writeFileSync(join(pythonHome, "python311_d.dll"), "do not copy");
+writeFileSync(join(pythonHome, "Lib", "os.py"), "fake stdlib");
+writeFileSync(join(pythonHome, "Lib", "site-packages", "global_pkg", "__init__.py"), "do not copy");
+writeFileSync(join(pythonHome, "Scripts", "pip.exe"), "do not copy");
 writeFileSync(
   join(projectRoot, "scripts", "diarize_cpu_backend.py"),
   "print('fake diarize backend')\n",
@@ -77,7 +93,14 @@ runPowerShell([
 ]);
 
 assert.ok(existsSync(join(extractDir, "runtime-manifest.json")));
+assert.ok(existsSync(join(extractDir, ".python", "python.exe")));
+assert.ok(existsSync(join(extractDir, ".python", "python311.dll")));
+assert.equal(existsSync(join(extractDir, ".python", "python311.pdb")), false);
+assert.equal(existsSync(join(extractDir, ".python", "python311_d.dll")), false);
+assert.equal(existsSync(join(extractDir, ".python", "Lib", "site-packages")), false);
+assert.equal(existsSync(join(extractDir, ".python", "Scripts")), false);
 assert.ok(existsSync(join(extractDir, ".venv-diarize", "Scripts", "python.exe")));
+assert.ok(existsSync(join(extractDir, ".venv-diarize", "Lib", "site-packages", "diarize.pth")));
 assert.ok(existsSync(join(extractDir, "scripts", "diarize_cpu_backend.py")));
 assert.ok(existsSync(join(extractDir, "scripts", "requirements-diarize-cpu.txt")));
 assert.equal(existsSync(join(extractDir, "scripts", "cloud_asr_benchmark.py")), false);
@@ -85,7 +108,8 @@ assert.equal(existsSync(join(extractDir, "scripts", "cloud_asr_benchmark.py")), 
 const manifest = JSON.parse(readFileSync(join(extractDir, "runtime-manifest.json"), "utf8"));
 assert.equal(manifest.name, "meeting-minutes-diarize-runtime");
 assert.equal(manifest.version, "9.9.9-test");
-assert.equal(manifest.layout.python, ".venv-diarize/Scripts/python.exe");
+assert.equal(manifest.layout.python, ".python/python.exe");
+assert.equal(manifest.layout.sitePackages, ".venv-diarize/Lib/site-packages");
 assert.equal(manifest.layout.backendScript, "scripts/diarize_cpu_backend.py");
 
 mkdirSync(outsideTarget, { recursive: true });
@@ -107,6 +131,7 @@ runPowerShell([
 ]);
 
 assert.ok(existsSync(join(installRoot, ".venv-diarize", "Scripts", "python.exe")));
+assert.ok(existsSync(join(installRoot, ".python", "python.exe")));
 assert.ok(existsSync(join(installRoot, "scripts", "diarize_cpu_backend.py")));
 assert.ok(existsSync(join(installRoot, "runtime-manifest.json")));
 assert.ok(existsSync(join(installRoot, "installed-manifest.json")));
@@ -134,6 +159,7 @@ runPowerShell([
 ]);
 
 assert.ok(existsSync(join(resourceDir, ".venv-diarize", "Scripts", "python.exe")));
+assert.ok(existsSync(join(resourceDir, ".python", "python.exe")));
 assert.ok(existsSync(join(resourceDir, "scripts", "diarize_cpu_backend.py")));
 assert.ok(existsSync(join(resourceDir, "scripts", "requirements-diarize-cpu.txt")));
 assert.ok(existsSync(join(resourceDir, "runtime-manifest.json")));
@@ -142,3 +168,5 @@ assert.equal(existsSync(join(resourceDir, "scripts", "cloud_asr_benchmark.py")),
 const staged = JSON.parse(readFileSync(join(resourceDir, "runtime-manifest.json"), "utf8"));
 assert.equal(staged.name, "meeting-minutes-diarize-runtime");
 assert.equal(staged.version, "9.9.9-test");
+assert.equal(staged.layout.python, ".python/python.exe");
+assert.equal(staged.layout.sitePackages, ".venv-diarize/Lib/site-packages");

@@ -74,6 +74,7 @@ pub struct DiarizationAssetPaths {
 pub struct ModernCpuBackendPaths {
     pub python_exe: PathBuf,
     pub script_path: PathBuf,
+    pub python_path: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -342,17 +343,46 @@ pub fn diarization_asset_paths(app_data_dir: &Path) -> DiarizationAssetPaths {
 }
 
 pub fn modern_cpu_backend_paths(project_root: &Path) -> ModernCpuBackendPaths {
+    let portable_python = project_root.join(".python").join("python.exe");
+    let site_packages = project_root
+        .join(".venv-diarize")
+        .join("Lib")
+        .join("site-packages");
+    let script_path = project_root.join("scripts").join("diarize_cpu_backend.py");
+
+    if portable_python.exists() {
+        return ModernCpuBackendPaths {
+            python_exe: portable_python,
+            script_path,
+            python_path: vec![site_packages],
+        };
+    }
+
     ModernCpuBackendPaths {
         python_exe: project_root
             .join(".venv-diarize")
             .join("Scripts")
             .join("python.exe"),
-        script_path: project_root.join("scripts").join("diarize_cpu_backend.py"),
+        script_path,
+        python_path: Vec::new(),
     }
 }
 
 fn modern_cpu_backend_exists(paths: &ModernCpuBackendPaths) -> bool {
-    paths.python_exe.exists() && paths.script_path.exists()
+    paths.python_exe.exists()
+        && paths.script_path.exists()
+        && paths.python_path.iter().all(|path| path.exists())
+}
+
+fn configure_modern_cpu_python_env(command: &mut Command, backend: &ModernCpuBackendPaths) {
+    if backend.python_path.is_empty() {
+        return;
+    }
+
+    if let Ok(python_path) = std::env::join_paths(&backend.python_path) {
+        command.env("PYTHONPATH", python_path);
+    }
+    command.env("PYTHONNOUSERSITE", "1");
 }
 
 fn explicit_modern_cpu_backend_paths() -> Option<ModernCpuBackendPaths> {
@@ -363,6 +393,7 @@ fn explicit_modern_cpu_backend_paths() -> Option<ModernCpuBackendPaths> {
             let paths = ModernCpuBackendPaths {
                 python_exe,
                 script_path,
+                python_path: Vec::new(),
             };
             modern_cpu_backend_exists(&paths).then_some(paths)
         }
@@ -971,6 +1002,7 @@ async fn run_modern_cpu_backend(
     tokio::task::spawn_blocking(move || {
         let mut command = Command::new(&backend.python_exe);
         hide_command_window(&mut command);
+        configure_modern_cpu_python_env(&mut command, &backend);
         command
             .arg(&backend.script_path)
             .arg("--audio")
@@ -1062,6 +1094,7 @@ async fn run_modern_cpu_backend_batch(
     tokio::task::spawn_blocking(move || {
         let mut command = Command::new(&backend.python_exe);
         hide_command_window(&mut command);
+        configure_modern_cpu_python_env(&mut command, &backend);
         command
             .arg(&backend.script_path)
             .arg("--chunks-json")

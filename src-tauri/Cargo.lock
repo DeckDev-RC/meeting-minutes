@@ -1948,7 +1948,7 @@ dependencies = [
 
 [[package]]
 name = "meeting-minutes"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "aho-corasick",
  "base64 0.22.1",

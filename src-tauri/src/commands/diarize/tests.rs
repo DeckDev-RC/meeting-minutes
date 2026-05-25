@@ -465,6 +465,34 @@ fn modern_cpu_backend_paths_point_to_project_tools() {
 }
 
 #[test]
+fn modern_cpu_backend_paths_prefer_portable_python_when_bundled() {
+    let root = std::env::temp_dir().join(format!(
+        "meeting-minutes-modern-backend-portable-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let portable_python = root.join(".python").join("python.exe");
+    let site_packages = root
+        .join(".venv-diarize")
+        .join("Lib")
+        .join("site-packages");
+    let script_path = root.join("scripts").join("diarize_cpu_backend.py");
+
+    std::fs::create_dir_all(portable_python.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(&site_packages).unwrap();
+    std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+    std::fs::File::create(&portable_python).unwrap();
+    std::fs::File::create(&script_path).unwrap();
+
+    let paths = modern_cpu_backend_paths(&root);
+
+    assert_eq!(paths.python_exe, portable_python);
+    assert_eq!(paths.python_path, vec![site_packages]);
+    assert!(modern_cpu_backend_exists(&paths));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn modern_cpu_backend_exists_requires_python_and_script() {
     let root = std::env::temp_dir().join(format!(
         "meeting-minutes-modern-backend-test-{}",
