@@ -52,6 +52,17 @@ pub struct MeetingAction {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct MeetingTopic {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub timestamp_sec: f64,
+    #[serde(default)]
+    pub evidence: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct MeetingChunkInsights {
     pub chunk_index: usize,
     pub start_sec: f64,
@@ -60,6 +71,8 @@ pub struct MeetingChunkInsights {
     pub summary: String,
     #[serde(default)]
     pub topics: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub topic_evidence: Vec<MeetingTopic>,
     #[serde(default)]
     pub decisions: Vec<MeetingDecision>,
     #[serde(default)]

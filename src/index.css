@@ -66,3 +66,60 @@ html[data-theme='dark'] textarea {
   color: #eef4ff;
   border-color: #314461;
 }
+
+html[data-theme='dark'] .export-menu {
+  background-color: #111c2e;
+  border-color: #314461;
+}
+
+html[data-theme='dark'] .export-menu-item {
+  color: #eef4ff;
+}
+
+html[data-theme='dark'] .export-menu-item:hover,
+html[data-theme='dark'] .export-menu-item:focus-visible {
+  background-color: #1b2a42;
+}
+
+html[data-theme='dark'] .review-metric-card-default {
+  background-color: #111c2e;
+  border-color: #314461;
+  color: #eef4ff;
+}
+
+html[data-theme='dark'] .review-metric-card-default:hover {
+  background-color: #16243a;
+  border-color: #3b82f6;
+}
+
+html[data-theme='dark'] .review-metric-card-good {
+  background-color: #0c271f;
+  border-color: #166044;
+  color: #d1fae5;
+}
+
+html[data-theme='dark'] .review-metric-card-good:hover {
+  background-color: #10372c;
+  border-color: #34d399;
+}
+
+html[data-theme='dark'] .review-metric-card-warning {
+  background-color: #2d2109;
+  border-color: #8a5a12;
+  color: #fef3c7;
+}
+
+html[data-theme='dark'] .review-metric-card-warning:hover {
+  background-color: #3a2b0d;
+  border-color: #f59e0b;
+}
+
+html[data-theme='dark'] .review-metric-card-good .review-metric-label,
+html[data-theme='dark'] .review-metric-card-good .review-metric-detail {
+  color: #a7f3d0;
+}
+
+html[data-theme='dark'] .review-metric-card-warning .review-metric-label,
+html[data-theme='dark'] .review-metric-card-warning .review-metric-detail {
+  color: #fde68a;
+}

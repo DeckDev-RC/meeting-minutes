@@ -1,4 +1,4 @@
-use super::DbState;
+use super::{processing_jobs::finalize_processing_jobs_for_meeting_record, DbState};
 use crate::models::meeting::Meeting;
 use rusqlite::params;
 use tauri::command;
@@ -108,5 +108,6 @@ pub fn update_meeting_status(
         params![status, now, id],
     )
     .map_err(|e| e.to_string())?;
+    finalize_processing_jobs_for_meeting_record(&db, &id, &status, &now)?;
     Ok(())
 }

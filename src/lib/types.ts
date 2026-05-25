@@ -114,6 +114,13 @@ export interface StructuredEvidence {
   createdAt: string;
 }
 
+export interface EvidencePurgeSummary {
+  removedTopics: number;
+  removedDecisions: number;
+  removedActions: number;
+  removedTotal: number;
+}
+
 export interface MinuteVersionSummary {
   id: string;
   minuteId: string;
@@ -132,6 +139,7 @@ export interface StructuredMinutesData {
   modelUsed: string;
   userEdited: boolean;
   participantNames: string[];
+  purgeSummary: EvidencePurgeSummary | null;
   createdAt: string;
   decisions: StructuredDecision[];
   actions: StructuredAction[];
@@ -211,12 +219,19 @@ export interface MeetingAction {
   evidence: string;
 }
 
+export interface MeetingTopic {
+  title: string;
+  timestampSec: number;
+  evidence: string;
+}
+
 export interface MeetingChunkInsights {
   chunkIndex: number;
   startSec: number;
   endSec: number;
   summary: string;
   topics: string[];
+  topicEvidence?: MeetingTopic[];
   decisions: MeetingDecision[];
   actions: MeetingAction[];
   questions: string[];

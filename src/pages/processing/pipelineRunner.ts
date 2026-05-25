@@ -26,6 +26,7 @@ import {
   saveMinutes,
   saveProcessingChunks,
   saveTranscription,
+  updateProcessingChunkFacts,
   updateMeetingStatus,
 } from "../../lib/tauri";
 import { mergeSortedTranscriptionSegments } from "../../lib/segmentMerge";
@@ -39,7 +40,13 @@ import {
   normalizeSpeakerDiarizationRuntime,
 } from "../../lib/diarizationRuntime";
 import {
+  purgeUnverifiedMeetingInsightsEvidence,
+  summarizeEvidencePurge,
+  type EvidenceValidationItem,
+} from "../../lib/minutesEvidence";
+import {
   applyLiveTranscriptSpeakers,
+  appendLiveInsights,
   appendLiveTranscript,
   buildLiveMinutesDraft,
   createLiveProcessingState,
@@ -598,7 +605,51 @@ export const runProcessingPipeline = async (
       ]).finally(stopWaitingForSpeakersProgress);
       const diarizedJson = JSON.stringify(diarized);
       const diarizedSpeakersJson = JSON.stringify(diarized.speakers);
-      const meetingFactsJson = JSON.stringify(meetingFacts);
+      const purgeResults = meetingFacts.map((insights) =>
+        purgeUnverifiedMeetingInsightsEvidence(
+          insights,
+          parsedSegmentsByChunk.get(insights.chunkIndex) ?? [],
+        ),
+      );
+      const purgedEvidence = purgeResults.flatMap(
+        (result) => result.removed,
+      ) as EvidenceValidationItem[];
+      const purgeSummary = summarizeEvidencePurge(purgedEvidence);
+      const trustedMeetingFacts = purgeResults.map((result) => result.insights);
+      if (purgedEvidence.length > 0) {
+        const topicLabel = purgeSummary.removedTopics === 1 ? "topico" : "topicos";
+        const decisionLabel = purgeSummary.removedDecisions === 1 ? "decisao" : "decisoes";
+        const actionLabel = purgeSummary.removedActions === 1 ? "acao" : "acoes";
+        addLiveLog(
+          meetingId,
+          "warning",
+          `Purge anti-alucinacao removeu ${purgeSummary.removedTopics} ${topicLabel}, ${purgeSummary.removedDecisions} ${decisionLabel} e ${purgeSummary.removedActions} ${actionLabel} sem evidencia na transcricao.`,
+        );
+        await Promise.all(
+          purgeResults
+            .filter((result) => result.removed.length > 0)
+            .map((result) => {
+              const factsJson = JSON.stringify(result.insights);
+              patchStoredChunk(result.insights.chunkIndex, {
+                factsJson,
+                factsErrorMsg: null,
+              });
+              return updateProcessingChunkFacts(
+                meetingId,
+                result.insights.chunkIndex,
+                "done",
+                factsJson,
+              ).catch(() => {});
+            }),
+        );
+        for (const result of purgeResults) {
+          if (result.removed.length === 0) continue;
+          commitLiveState(meetingId, (state) =>
+            appendLiveInsights(state, result.insights, undefined, participantNames),
+          );
+        }
+      }
+      const meetingFactsJson = JSON.stringify(trustedMeetingFacts);
 
       await saveTranscription(
         meetingId,
@@ -647,6 +698,8 @@ export const runProcessingPipeline = async (
       setStepStatus("generate", "done");
       addLiveLog(meetingId, "success", "Ata final gerada.");
 
+      const minutesEngine = `meeting-minutes-local-v1-${processingProfile}`;
+
       // Save minutes plus the structured facts used to build the document.
       await saveMinutes(
         meetingId,
@@ -655,6 +708,8 @@ export const runProcessingPipeline = async (
         meetingFactsJson,
         diarizedJson,
         participantNames,
+        minutesEngine,
+        purgeSummary,
       );
 
       const benchmarkRun = buildBenchmarkRun({
@@ -663,10 +718,11 @@ export const runProcessingPipeline = async (
         sourcePath: meeting.filePath,
         processingSec: (Date.now() - startedAtRef.current) / 1000,
         audioSec: totalAudioSec,
-        engine: `meeting-minutes-local-v1-${processingProfile}`,
+        engine: minutesEngine,
         speakers: diarized.speakers,
-        facts: meetingFacts,
+        facts: trustedMeetingFacts,
         mediaMetadata: meetingMetadata,
+        purgeSummary,
       });
       const benchmarkRunPath = buildBenchmarkRunArtifactPath(processingWorkDir, meetingId);
       await saveBenchmarkRun(benchmarkRunPath, JSON.stringify(benchmarkRun, null, 2));

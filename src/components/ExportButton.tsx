@@ -23,14 +23,7 @@ function openSavedFolder(savedPath: string) {
 function createTemporaryMinutesElement(html: string) {
   const element = document.createElement("div");
   element.className = "minutes-wrapper";
-  element.style.position = "fixed";
-  element.style.left = "-20000px";
-  element.style.top = "0";
-  element.style.width = "794px";
-  element.style.background = "#ffffff";
-  element.style.zIndex = "-1";
   element.innerHTML = html;
-  document.body.appendChild(element);
   return element;
 }
 
@@ -105,25 +98,25 @@ export default function ExportButton({ title, executiveHtml }: Props) {
       </button>
 
       {menuOpen && (
-        <div className="absolute right-0 top-full z-20 mt-2 w-48 overflow-hidden rounded-lg border border-gray-200 bg-white py-1 text-sm shadow-lg">
+        <div className="export-menu absolute right-0 top-full z-20 mt-2 w-48 overflow-hidden rounded-lg border border-gray-200 bg-white py-1 text-sm shadow-lg">
           <button
             type="button"
             onClick={() => handleExport("executive-pdf")}
-            className="block w-full px-3 py-2 text-left font-medium text-gray-800 hover:bg-gray-50"
+            className="export-menu-item block w-full px-3 py-2 text-left font-medium text-gray-800 hover:bg-gray-50"
           >
             PDF executivo
           </button>
           <button
             type="button"
             onClick={() => handleExport("complete-pdf")}
-            className="block w-full px-3 py-2 text-left font-medium text-gray-800 hover:bg-gray-50"
+            className="export-menu-item block w-full px-3 py-2 text-left font-medium text-gray-800 hover:bg-gray-50"
           >
             PDF completo
           </button>
           <button
             type="button"
             onClick={() => handleExport("complete-html")}
-            className="block w-full px-3 py-2 text-left font-medium text-gray-800 hover:bg-gray-50"
+            className="export-menu-item block w-full px-3 py-2 text-left font-medium text-gray-800 hover:bg-gray-50"
           >
             HTML completo
           </button>

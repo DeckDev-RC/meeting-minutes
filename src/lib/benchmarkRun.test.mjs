@@ -52,6 +52,12 @@ const run = buildBenchmarkRun({
   audioSec: 600,
   engine: "meeting-minutes-local",
   speakers: ["SPEAKER_00", "SPEAKER_01"],
+  purgeSummary: {
+    removedTopics: 1,
+    removedDecisions: 2,
+    removedActions: 1,
+    removedTotal: 4,
+  },
   facts: [
     {
       chunkIndex: 0,
@@ -108,6 +114,12 @@ assert.deepEqual(run.cases[0].output.questions, ["Quem valida a planilha?"]);
 assert.deepEqual(run.cases[0].output.risks, ["Prazo apertado"]);
 assert.equal(run.cases[0].metadata.title, "Reuniao produto");
 assert.equal(run.cases[0].metadata.sourcePath, "C:\\Meetings\\produto.mp3");
+assert.deepEqual(run.cases[0].metadata.purgeSummary, {
+  removedTopics: 1,
+  removedDecisions: 2,
+  removedActions: 1,
+  removedTotal: 4,
+});
 
 assert.equal(
   buildBenchmarkRunFileName("meeting-123"),

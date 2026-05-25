@@ -92,6 +92,11 @@ fn meeting_chunk_insights_round_trips_from_structured_json() {
         "endSec": 960.0,
         "summary": "Equipe alinhou o prazo da entrega.",
         "topics": ["Entrega", "Riscos"],
+        "topicEvidence": [{
+            "title": "Entrega",
+            "timestampSec": 620.5,
+            "evidence": "alinhou o prazo da entrega"
+        }],
         "decisions": [{
             "title": "Manter escopo da sprint",
             "owner": "Falante 1",
@@ -112,6 +117,7 @@ fn meeting_chunk_insights_round_trips_from_structured_json() {
     let insights: MeetingChunkInsights = serde_json::from_value(json).unwrap();
 
     assert_eq!(insights.chunk_index, 2);
+    assert_eq!(insights.topic_evidence[0].title, "Entrega");
     assert_eq!(insights.actions[0].owner, "Ana");
     assert_eq!(insights.decisions[0].title, "Manter escopo da sprint");
 }
@@ -147,6 +153,7 @@ fn final_minutes_payload_uses_compact_facts_instead_of_raw_transcript() {
         end_sec: 360.0,
         summary: "Discussao sobre o cronograma.".to_string(),
         topics: vec!["Cronograma".to_string()],
+        topic_evidence: vec![],
         decisions: vec![],
         actions: vec![MeetingAction {
             task: "Enviar cronograma revisado".to_string(),
@@ -178,6 +185,7 @@ fn final_minutes_payload_includes_user_supplied_participant_names() {
         end_sec: 60.0,
         summary: "Alinhamento rapido.".to_string(),
         topics: vec!["Projeto".to_string()],
+        topic_evidence: vec![],
         decisions: vec![],
         actions: vec![],
         questions: vec![],
@@ -213,6 +221,7 @@ fn final_minutes_payload_uses_deduplicated_meeting_graph() {
             end_sec: 60.0,
             summary: "Equipe decidiu publicar o MVP.".to_string(),
             topics: vec!["MVP".to_string(), "Produto".to_string()],
+            topic_evidence: vec![],
             decisions: vec![MeetingDecision {
                 title: "Publicar MVP".to_string(),
                 owner: "Caio".to_string(),
@@ -235,6 +244,7 @@ fn final_minutes_payload_uses_deduplicated_meeting_graph() {
             end_sec: 120.0,
             summary: "Repetiram a acao da proposta.".to_string(),
             topics: vec!["mvp".to_string()],
+            topic_evidence: vec![],
             decisions: vec![MeetingDecision {
                 title: "publicar mvp".to_string(),
                 owner: "Caio".to_string(),
@@ -277,6 +287,7 @@ fn meeting_graph_does_not_promote_generic_owners_to_participants() {
         end_sec: 60.0,
         summary: "Equipe revisou a operacao e distribuiu pendencias.".to_string(),
         topics: vec!["Operacao".to_string()],
+        topic_evidence: vec![],
         decisions: vec![
             MeetingDecision {
                 title: "Priorizar cobranca".to_string(),
@@ -341,6 +352,7 @@ fn low_quality_minutes_detection_rejects_placeholders_and_missing_actions() {
         end_sec: 60.0,
         summary: "Equipe alinhou pendencias importantes.".to_string(),
         topics: vec!["Sistema leitor".to_string()],
+        topic_evidence: vec![],
         decisions: vec![MeetingDecision {
             title: "Resolver drivers desatualizados".to_string(),
             owner: "Caio".to_string(),
@@ -379,6 +391,7 @@ fn local_minutes_renderer_uses_meeting_graph_without_placeholders() {
             "Sistema leitor".to_string(),
             "Processamento de PDF".to_string(),
         ],
+        topic_evidence: vec![],
         decisions: vec![MeetingDecision {
             title: "Rafaela sera ponto de contato para problemas do leitor".to_string(),
             owner: "Caio".to_string(),
@@ -420,6 +433,7 @@ fn final_minutes_payload_includes_meeting_metadata() {
         end_sec: 60.0,
         summary: "Reuniao sobre operacao.".to_string(),
         topics: vec!["Operacao".to_string()],
+        topic_evidence: vec![],
         decisions: vec![],
         actions: vec![],
         questions: vec![],
@@ -457,6 +471,7 @@ fn local_minutes_renderer_uses_metadata_date_and_time() {
         end_sec: 120.0,
         summary: "Equipe alinhou plano de entrega.".to_string(),
         topics: vec!["Entrega".to_string()],
+        topic_evidence: vec![],
         decisions: vec![],
         actions: vec![],
         questions: vec![],
@@ -489,6 +504,7 @@ fn meeting_graph_normalizes_clear_name_variants_before_minutes() {
         summary: "Uma nova colaboradora, Rafael, sera treinada. Caio citou a Rafaela como contato."
             .to_string(),
         topics: vec!["Treinamento".to_string()],
+        topic_evidence: vec![],
         decisions: vec![MeetingDecision {
             title: "Rafael sera ponto de contato".to_string(),
             owner: "Caio".to_string(),
@@ -543,6 +559,7 @@ fn meeting_graph_uses_diarized_transcript_to_resolve_gendered_name_variants() {
         end_sec: 120.0,
         summary: "Caio vai sentar com Renata para alinhar a resolucao.".to_string(),
         topics: vec!["Suporte".to_string()],
+        topic_evidence: vec![],
         decisions: vec![],
         actions: vec![MeetingAction {
             task: "Anotar os problemas e alinhar com Renata para resolucao".to_string(),
@@ -574,6 +591,11 @@ fn chunk_fact_generation_config_uses_json_schema_response_format() {
     );
     assert_eq!(
         config["responseJsonSchema"]["properties"]["chunks"]["type"],
+        serde_json::json!("array")
+    );
+    assert_eq!(
+        config["responseJsonSchema"]["properties"]["chunks"]["items"]["properties"]
+            ["topicEvidence"]["type"],
         serde_json::json!("array")
     );
 }

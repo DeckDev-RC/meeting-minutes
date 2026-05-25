@@ -1,5 +1,11 @@
 import type { BenchmarkRun } from "./evaluation";
-import type { MeetingAction, MeetingChunkInsights, MeetingDecision, MeetingMetadata } from "./types";
+import type {
+  EvidencePurgeSummary,
+  MeetingAction,
+  MeetingChunkInsights,
+  MeetingDecision,
+  MeetingMetadata,
+} from "./types";
 
 export interface BenchmarkRunBuildInput {
   meetingId: string;
@@ -11,6 +17,7 @@ export interface BenchmarkRunBuildInput {
   speakers: string[];
   facts: MeetingChunkInsights[];
   mediaMetadata?: MeetingMetadata;
+  purgeSummary?: EvidencePurgeSummary;
 }
 
 export interface BenchmarkRunCaseMetadata {
@@ -18,6 +25,7 @@ export interface BenchmarkRunCaseMetadata {
   sourcePath: string;
   generatedAt: string;
   mediaMetadata?: MeetingMetadata;
+  purgeSummary?: EvidencePurgeSummary;
 }
 
 export type BenchmarkRunWithMetadata = BenchmarkRun & {
@@ -56,6 +64,7 @@ export function buildBenchmarkRun(input: BenchmarkRunBuildInput): BenchmarkRunWi
           sourcePath: input.sourcePath,
           generatedAt: createdAt,
           mediaMetadata: input.mediaMetadata,
+          purgeSummary: input.purgeSummary ? normalizePurgeSummary(input.purgeSummary) : undefined,
         },
       },
     ],
@@ -76,6 +85,19 @@ export function buildBenchmarkRunPath(sourcePath: string, meetingId: string): st
   const dir = lastSeparator >= 0 ? sourcePath.slice(0, lastSeparator) : ".";
   const separator = sourcePath.includes("\\") ? "\\" : "/";
   return `${dir.replace(/[\\/]+$/, "")}${separator}${buildBenchmarkRunFileName(meetingId)}`;
+}
+
+function normalizePurgeSummary(summary: EvidencePurgeSummary): EvidencePurgeSummary {
+  const removedTopics = nonNegativeInteger(summary.removedTopics);
+  const removedDecisions = nonNegativeInteger(summary.removedDecisions);
+  const removedActions = nonNegativeInteger(summary.removedActions);
+  const removedTotal = nonNegativeInteger(summary.removedTotal);
+  return {
+    removedTopics,
+    removedDecisions,
+    removedActions,
+    removedTotal: removedTotal || removedTopics + removedDecisions + removedActions,
+  };
 }
 
 function normalizeDecision(decision: MeetingDecision): MeetingDecision {
@@ -117,4 +139,9 @@ function uniqueStrings(values: string[]): string[] {
 
 function round3(value: number): number {
   return Math.round((value + Number.EPSILON) * 1000) / 1000;
+}
+
+function nonNegativeInteger(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.floor(value));
 }

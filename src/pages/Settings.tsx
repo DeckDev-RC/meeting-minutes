@@ -6,6 +6,7 @@ import {
   getApiKeys,
   getOfflineTranscriptionRuntimeStatus,
   installOfflineTranscriptionRuntime,
+  openFolder,
   removeOfflineTranscriptionRuntime,
   setApiKeys,
   validateApiKeys,
@@ -261,6 +262,7 @@ export default function Settings() {
     try {
       const path = await exportDiagnostics(null);
       setDiagnosticsMessage(`Diagnostico exportado: ${path}`);
+      if (path) await openFolder(path);
     } catch (error) {
       setDiagnosticsError(error instanceof Error ? error.message : String(error));
     }

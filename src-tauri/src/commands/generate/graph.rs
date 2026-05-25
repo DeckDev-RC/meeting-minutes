@@ -1,6 +1,6 @@
 use super::participants::normalize_participant_names;
 use crate::models::transcription::{
-    DiarizedResult, MeetingAction, MeetingChunkInsights, MeetingDecision,
+    DiarizedResult, MeetingAction, MeetingChunkInsights, MeetingDecision, MeetingTopic,
 };
 use aho_corasick::AhoCorasick;
 use std::collections::HashSet;
@@ -155,6 +155,11 @@ fn collect_insight_text(
             .map(|item| item.len() + 1)
             .sum::<usize>();
         estimated += insight
+            .topic_evidence
+            .iter()
+            .map(|item| item.title.len() + item.evidence.len() + 2)
+            .sum::<usize>();
+        estimated += insight
             .decisions
             .iter()
             .map(|item| item.title.len() + item.owner.len() + item.evidence.len() + 3)
@@ -192,6 +197,12 @@ fn collect_insight_text(
         text.push('\n');
         for topic in &insight.topics {
             text.push_str(topic);
+            text.push('\n');
+        }
+        for topic in &insight.topic_evidence {
+            text.push_str(&topic.title);
+            text.push('\n');
+            text.push_str(&topic.evidence);
             text.push('\n');
         }
         for decision in &insight.decisions {
@@ -434,6 +445,12 @@ fn normalize_action_names(
     action
 }
 
+fn normalize_topic_names(mut topic: MeetingTopic, aliases: &PreparedNameAliases) -> MeetingTopic {
+    topic.title = replace_prepared_name_aliases(&topic.title, aliases);
+    topic.evidence = replace_prepared_name_aliases(&topic.evidence, aliases);
+    topic
+}
+
 fn normalize_insight_names(
     mut insight: MeetingChunkInsights,
     aliases: &PreparedNameAliases,
@@ -447,6 +464,11 @@ fn normalize_insight_names(
         .topics
         .into_iter()
         .map(|topic| replace_prepared_name_aliases(&topic, aliases))
+        .collect();
+    insight.topic_evidence = insight
+        .topic_evidence
+        .into_iter()
+        .map(|topic| normalize_topic_names(topic, aliases))
         .collect();
     insight.decisions = insight
         .decisions

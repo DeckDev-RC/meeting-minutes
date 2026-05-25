@@ -77,10 +77,11 @@ REGRAS:
 - Use [] quando nao houver decisoes, acoes, perguntas ou riscos.
 - "summary" deve ter no maximo 240 caracteres.
 - "topics" deve ter no maximo 6 itens.
+- Para cada item de "topics", inclua um item correspondente em "topicEvidence" com title igual, timestampSec e evidence literal da transcricao.
 - "decisions" deve ter no maximo 5 itens.
 - "actions" deve ter no maximo 8 itens.
 - "questions" e "risks" devem ter no maximo 6 itens cada.
-- "evidence" deve ter no maximo 120 caracteres.
+- "evidence" deve ter no maximo 120 caracteres e deve aparecer na transcricao.
 - "timestampSec" deve ser o tempo aproximado em segundos do fato.
 - Se houver muitos fatos repetidos, escolha apenas os mais importantes.
 - Retorne SOMENTE JSON valido, sem markdown.
@@ -92,6 +93,13 @@ FORMATO:
   "endSec": {end_sec},
   "summary": "resumo curto do trecho",
   "topics": ["topico"],
+  "topicEvidence": [
+    {{
+      "title": "topico",
+      "timestampSec": 0,
+      "evidence": "trecho curto"
+    }}
+  ],
   "decisions": [
     {{
       "title": "decisao objetiva",
@@ -171,10 +179,11 @@ REGRAS:
 - Use [] quando nao houver decisoes, acoes, perguntas ou riscos.
 - "summary" deve ter no maximo 240 caracteres por trecho.
 - "topics" deve ter no maximo 6 itens por trecho.
+- Para cada item de "topics", inclua um item correspondente em "topicEvidence" com title igual, timestampSec e evidence literal da transcricao.
 - "decisions" deve ter no maximo 5 itens por trecho.
 - "actions" deve ter no maximo 8 itens por trecho.
 - "questions" e "risks" devem ter no maximo 6 itens cada.
-- "evidence" deve ter no maximo 120 caracteres.
+- "evidence" deve ter no maximo 120 caracteres e deve aparecer na transcricao.
 - "timestampSec" deve ser o tempo aproximado em segundos do fato.
 - Se houver muitos fatos repetidos, escolha apenas os mais importantes.
 

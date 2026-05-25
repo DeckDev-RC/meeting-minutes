@@ -3,11 +3,12 @@ import type {
   MeetingAction,
   MeetingChunkInsights,
   MeetingDecision,
+  MeetingTopic,
   TranscriptionSegment,
 } from './types';
 
 type EvidenceSegment = Pick<TranscriptionSegment | DiarizedSegment, 'start' | 'end' | 'text'>;
-type EvidenceKind = 'decision' | 'action';
+type EvidenceKind = 'topic' | 'decision' | 'action';
 
 export interface EvidenceValidationItem {
   kind: EvidenceKind;
@@ -126,12 +127,50 @@ function sanitizeAction(value: unknown, startSec: number, endSec: number): Meeti
   };
 }
 
+function sanitizeTopicEvidence(value: unknown, startSec: number, endSec: number): MeetingTopic | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Partial<MeetingTopic>;
+  const title = stringValue(raw.title);
+  const evidence = stringValue(raw.evidence);
+  const timestampSec = finiteNumber(raw.timestampSec, startSec);
+  if (!title || !evidence || !timestampWithinChunk(timestampSec, startSec, endSec)) return null;
+  return {
+    title: title.slice(0, MAX_TEXT_CHARS),
+    timestampSec,
+    evidence: evidence.slice(0, MAX_TEXT_CHARS),
+  };
+}
+
+function uniqueTopicEvidence(values: MeetingTopic[], limit = MAX_LIST_ITEMS) {
+  const seen = new Set<string>();
+  const result: MeetingTopic[] = [];
+  for (const value of values) {
+    const key = normalizeEvidenceText(value.title);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(value);
+    if (result.length >= limit) break;
+  }
+  return result;
+}
+
 export function sanitizeMeetingChunkInsights(value: unknown): MeetingChunkInsights {
   const raw = value && typeof value === 'object' ? (value as Partial<MeetingChunkInsights>) : {};
   const chunkIndex = Math.max(0, Math.floor(finiteNumber(raw.chunkIndex, 0)));
   const startSec = Math.max(0, finiteNumber(raw.startSec, 0));
   const endSec = Math.max(startSec, finiteNumber(raw.endSec, startSec));
   const summary = stringValue(raw.summary).slice(0, MAX_TEXT_CHARS) || 'Trecho sem resumo estruturado.';
+  const topicEvidence = Array.isArray(raw.topicEvidence)
+    ? uniqueTopicEvidence(
+        raw.topicEvidence
+          .map((item) => sanitizeTopicEvidence(item, startSec, endSec))
+          .filter((item): item is MeetingTopic => Boolean(item)),
+      )
+    : undefined;
+  const topics = uniqueStrings([
+    ...(Array.isArray(raw.topics) ? raw.topics.filter((item): item is string => typeof item === 'string') : []),
+    ...(topicEvidence?.map((topic) => topic.title) ?? []),
+  ]);
 
   const decisions = Array.isArray(raw.decisions)
     ? raw.decisions
@@ -146,12 +185,12 @@ export function sanitizeMeetingChunkInsights(value: unknown): MeetingChunkInsigh
         .slice(0, MAX_FACT_ITEMS)
     : [];
 
-  return {
+  const sanitized: MeetingChunkInsights = {
     chunkIndex,
     startSec,
     endSec,
     summary,
-    topics: Array.isArray(raw.topics) ? uniqueStrings(raw.topics.filter((item): item is string => typeof item === 'string')) : [],
+    topics,
     decisions,
     actions,
     questions: Array.isArray(raw.questions)
@@ -161,6 +200,10 @@ export function sanitizeMeetingChunkInsights(value: unknown): MeetingChunkInsigh
       ? uniqueStrings(raw.risks.filter((item): item is string => typeof item === 'string'))
       : [],
   };
+  if (topicEvidence) {
+    sanitized.topicEvidence = topicEvidence;
+  }
+  return sanitized;
 }
 
 export function evidenceSimilarity(source: string, evidence: string) {
@@ -220,6 +263,9 @@ export function validateMeetingInsightsEvidence(
     });
   };
 
+  for (const topic of insights.topicEvidence ?? []) {
+    append('topic', topic.title, topic.evidence);
+  }
   for (const decision of insights.decisions) {
     append('decision', decision.title, decision.evidence);
   }
@@ -234,6 +280,82 @@ export function validateMeetingInsightsEvidence(
   };
 }
 
+export function purgeUnverifiedMeetingInsightsEvidence(
+  insights: MeetingChunkInsights,
+  segments: EvidenceSegment[],
+  threshold = EVIDENCE_THRESHOLD,
+) {
+  if (segments.length === 0) {
+    return { insights, removed: [] as EvidenceValidationItem[] };
+  }
+
+  const removed: EvidenceValidationItem[] = [];
+  const keepEvidence = (
+    kind: EvidenceKind,
+    label: string,
+    evidence: string,
+  ) => {
+    const score = bestEvidenceScore(evidence, segments);
+    const verified = score >= threshold;
+    if (!verified) {
+      removed.push({
+        kind,
+        chunkIndex: insights.chunkIndex,
+        label,
+        evidence,
+        score,
+        verified,
+      });
+    }
+    return verified;
+  };
+
+  const hasTopicEvidence = Array.isArray(insights.topicEvidence);
+  const topicEvidence = (insights.topicEvidence ?? []).filter((topic) =>
+    keepEvidence('topic', topic.title, topic.evidence),
+  );
+  const verifiedTopicKeys = new Set(topicEvidence.map((topic) => normalizeEvidenceText(topic.title)));
+  const knownTopicKeys = new Set((insights.topicEvidence ?? []).map((topic) => normalizeEvidenceText(topic.title)));
+  const topics = hasTopicEvidence
+    ? insights.topics.filter((topic) => {
+        const key = normalizeEvidenceText(topic);
+        if (verifiedTopicKeys.has(key)) return true;
+        if (!knownTopicKeys.has(key)) {
+          removed.push({
+            kind: 'topic',
+            chunkIndex: insights.chunkIndex,
+            label: topic,
+            evidence: '',
+            score: 0,
+            verified: false,
+          });
+        }
+        return false;
+      })
+    : insights.topics;
+  const decisions = insights.decisions.filter((decision) =>
+    keepEvidence('decision', decision.title, decision.evidence),
+  );
+  const actions = insights.actions.filter((action) =>
+    keepEvidence('action', action.task, action.evidence),
+  );
+
+  if (removed.length === 0) {
+    return { insights, removed };
+  }
+
+  return {
+    insights: {
+      ...insights,
+      topics,
+      ...(hasTopicEvidence ? { topicEvidence } : {}),
+      decisions,
+      actions,
+    },
+    removed,
+  };
+}
+
 export function summarizeEvidenceValidation(summaries: EvidenceValidationSummary[]) {
   const total = summaries.reduce((sum, item) => sum + item.total, 0);
   const verified = summaries.reduce((sum, item) => sum + item.verified, 0);
@@ -241,5 +363,17 @@ export function summarizeEvidenceValidation(summaries: EvidenceValidationSummary
     total,
     verified,
     ratio: total === 0 ? 1 : verified / total,
+  };
+}
+
+export function summarizeEvidencePurge(removed: EvidenceValidationItem[]) {
+  const removedTopics = removed.filter((item) => item.kind === 'topic').length;
+  const removedDecisions = removed.filter((item) => item.kind === 'decision').length;
+  const removedActions = removed.filter((item) => item.kind === 'action').length;
+  return {
+    removedTopics,
+    removedDecisions,
+    removedActions,
+    removedTotal: removedTopics + removedDecisions + removedActions,
   };
 }

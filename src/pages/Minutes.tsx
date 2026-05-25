@@ -27,6 +27,7 @@ import type {
   MeetingChunkInsights,
   MeetingDecision,
   ProcessingChunkRecord,
+  EvidencePurgeSummary,
   StructuredAction,
   StructuredActionPatch,
   StructuredDecision,
@@ -239,6 +240,33 @@ function EvidenceBadge({ validation }: { validation?: EvidenceValidationItem }) 
   );
 }
 
+function PurgeSummaryNotice({ summary }: { summary?: EvidencePurgeSummary | null }) {
+  const removedTotal = summary?.removedTotal ?? 0;
+  if (removedTotal <= 0) return null;
+
+  const removedTopics = summary?.removedTopics ?? 0;
+  const removedDecisions = summary?.removedDecisions ?? 0;
+  const removedActions = summary?.removedActions ?? 0;
+  const itemLabel = removedTotal === 1 ? "item" : "itens";
+  const topicLabel = removedTopics === 1 ? "topico" : "topicos";
+  const decisionLabel = removedDecisions === 1 ? "decisao" : "decisoes";
+  const actionLabel = removedActions === 1 ? "acao" : "acoes";
+
+  return (
+    <div
+      aria-label="Resumo do purge anti-alucinacao"
+      className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+    >
+      <p className="font-semibold">
+        Purge anti-alucinacao removeu {removedTotal} {itemLabel} sem evidencia
+      </p>
+      <p className="mt-1 text-xs font-medium text-amber-800">
+        {removedTopics} {topicLabel}, {removedDecisions} {decisionLabel}, {removedActions} {actionLabel}
+      </p>
+    </div>
+  );
+}
+
 function DecisionItem({
   decision,
   validation,
@@ -302,23 +330,23 @@ function ReviewMetricButton({
 }) {
   const toneClass =
     tone === "warning"
-      ? "border-amber-200 bg-amber-50 text-amber-900 hover:border-amber-300"
+      ? "review-metric-card-warning border-amber-200 bg-amber-50 text-amber-900 hover:border-amber-300"
       : tone === "good"
-        ? "border-emerald-200 bg-emerald-50 text-emerald-900 hover:border-emerald-300"
-        : "border-gray-200 bg-white text-gray-900 hover:border-blue-200 hover:bg-blue-50/40";
+        ? "review-metric-card-good border-emerald-200 bg-emerald-50 text-emerald-900 hover:border-emerald-300"
+        : "review-metric-card-default border-gray-200 bg-white text-gray-900 hover:border-blue-200 hover:bg-blue-50/40";
 
   return (
     <button
       type="button"
       aria-label={ariaLabel ?? `Abrir ${label}`}
       onClick={onClick}
-      className={`rounded-lg border px-4 py-3 text-left shadow-sm transition ${toneClass}`}
+      className={`review-metric-card rounded-lg border px-4 py-3 text-left shadow-sm transition ${toneClass}`}
     >
-      <span className="block text-xs font-semibold uppercase tracking-wide text-gray-500">
+      <span className="review-metric-label block text-xs font-semibold uppercase tracking-wide text-gray-500">
         {label}
       </span>
       <span className="mt-1 block text-2xl font-bold tabular-nums">{value}</span>
-      <span className="mt-1 block text-xs leading-5 text-gray-600">{detail}</span>
+      <span className="review-metric-detail mt-1 block text-xs leading-5 text-gray-600">{detail}</span>
     </button>
   );
 }
@@ -728,6 +756,8 @@ export default function Minutes() {
           Salvando revisao...
         </div>
       )}
+
+      <PurgeSummaryNotice summary={structuredMinutes?.purgeSummary} />
 
       {structuredMinutes && (
         <section

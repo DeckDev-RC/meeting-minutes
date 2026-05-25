@@ -114,6 +114,7 @@ assert.ok(chunks.every((chunk) => chunk.endSec > chunk.startSec));
 const prompt = buildGeminiChunkFactsPrompt(chunks[0], meetingBankCases[0]);
 assert.ok(prompt.includes("Return only valid JSON"));
 assert.ok(prompt.includes('"chunkIndex"'));
+assert.ok(prompt.includes('"topicEvidence"'));
 assert.ok(prompt.includes(chunks[0].text));
 
 const finalPrompt = buildGeminiFinalMinutesPrompt(meetingBankCases[0], [
@@ -133,7 +134,7 @@ assert.ok(finalPrompt.includes("HTML"));
 assert.ok(finalPrompt.includes("Approved the plan."));
 
 const parsed = parseGeminiChunkFactsText(
-  "```json\n{\"summary\":\"Resumo\",\"topics\":[\"Topico\"],\"decisions\":[],\"actions\":[],\"questions\":[],\"risks\":[]}\n```",
+  "```json\n{\"summary\":\"Resumo\",\"topics\":[\"Topico\"],\"topicEvidence\":[{\"title\":\"Topico\",\"timestampSec\":2,\"evidence\":\"Topico discutido\"}],\"decisions\":[],\"actions\":[],\"questions\":[],\"risks\":[]}\n```",
   chunks[0],
 );
 
@@ -141,6 +142,13 @@ assert.equal(parsed.chunkIndex, 0);
 assert.equal(parsed.startSec, chunks[0].startSec);
 assert.equal(parsed.summary, "Resumo");
 assert.deepEqual(parsed.topics, ["Topico"]);
+assert.deepEqual(parsed.topicEvidence, [
+  {
+    title: "Topico",
+    timestampSec: 2,
+    evidence: "Topico discutido",
+  },
+]);
 
 const fallback = parseGeminiChunkFactsText("not json", chunks[0]);
 assert.equal(fallback.chunkIndex, chunks[0].chunkIndex);

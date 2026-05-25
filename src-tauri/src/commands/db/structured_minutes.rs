@@ -49,6 +49,46 @@ fn parse_participant_names_json(value: Option<&str>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn purge_count(value: Option<&serde_json::Value>) -> i64 {
+    value
+        .and_then(|item| {
+            item.as_i64()
+                .or_else(|| item.as_u64().and_then(|value| i64::try_from(value).ok()))
+        })
+        .unwrap_or(0)
+        .max(0)
+}
+
+fn normalize_purge_summary_value(value: serde_json::Value) -> Option<serde_json::Value> {
+    if !value.is_object() {
+        return None;
+    }
+    let removed_topics = purge_count(value.get("removedTopics"));
+    let removed_decisions = purge_count(value.get("removedDecisions"));
+    let removed_actions = purge_count(value.get("removedActions"));
+    Some(serde_json::json!({
+        "removedTopics": removed_topics,
+        "removedDecisions": removed_decisions,
+        "removedActions": removed_actions,
+        "removedTotal": removed_topics + removed_decisions + removed_actions,
+    }))
+}
+
+fn encode_purge_summary_json(summary: Option<serde_json::Value>) -> Result<Option<String>, String> {
+    let Some(summary) = summary.and_then(normalize_purge_summary_value) else {
+        return Ok(None);
+    };
+    serde_json::to_string(&summary)
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
+fn parse_purge_summary_json(value: Option<&str>) -> Option<serde_json::Value> {
+    value
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .and_then(normalize_purge_summary_value)
+}
+
 fn chunk_segments_by_index(
     tx: &rusqlite::Transaction<'_>,
     meeting_id: &str,
@@ -209,6 +249,17 @@ fn insert_structured_action(
     Ok(())
 }
 
+fn should_keep_structured_evidence(quote: &str, raw_segments_json: Option<&str>) -> bool {
+    let Some(raw_segments_json) = raw_segments_json
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return true;
+    };
+
+    validate_evidence_against_segments_json(quote, Some(raw_segments_json)).verified
+}
+
 pub(super) fn persist_structured_minutes(
     tx: &rusqlite::Transaction<'_>,
     minute_id: &str,
@@ -225,6 +276,9 @@ pub(super) fn persist_structured_minutes(
             .get(&chunk.chunk_index)
             .map(String::as_str);
         for decision in &chunk.decisions {
+            if !should_keep_structured_evidence(&decision.evidence, raw_segments_json) {
+                continue;
+            }
             insert_structured_decision(
                 tx,
                 minute_id,
@@ -238,6 +292,9 @@ pub(super) fn persist_structured_minutes(
             decision_index += 1;
         }
         for action in &chunk.actions {
+            if !should_keep_structured_evidence(&action.evidence, raw_segments_json) {
+                continue;
+            }
             insert_structured_action(
                 tx,
                 minute_id,
@@ -265,19 +322,21 @@ pub fn save_minutes(
     facts_json: Option<String>,
     diarized_json: Option<String>,
     participant_names: Option<Vec<String>>,
+    purge_summary: Option<serde_json::Value>,
 ) -> Result<(), String> {
     let facts = parse_minutes_facts(facts_json.as_deref())?;
     let participant_names_json = participant_names
         .map(encode_participant_names_json)
         .transpose()?
         .flatten();
+    let purge_summary_json = encode_purge_summary_json(purge_summary)?;
     let mut db = state.0.lock().map_err(|e| e.to_string())?;
     let tx = db.transaction().map_err(|e| e.to_string())?;
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     tx.execute(
-        "INSERT INTO minutes (id, meeting_id, html_content, pdf_path, model_used, participant_names_json, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO minutes (id, meeting_id, html_content, pdf_path, model_used, participant_names_json, purge_summary_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             &id,
             &meeting_id,
@@ -285,6 +344,7 @@ pub fn save_minutes(
             &pdf_path,
             &model_used,
             &participant_names_json,
+            &purge_summary_json,
             &now
         ],
     )
@@ -292,8 +352,8 @@ pub fn save_minutes(
     let version_no = next_minute_version_no(&tx, &meeting_id)?;
     tx.execute(
         "INSERT INTO minute_versions
-            (id, minute_id, meeting_id, version_no, html_content, facts_json, diarized_json, participant_names_json, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            (id, minute_id, meeting_id, version_no, html_content, facts_json, diarized_json, participant_names_json, purge_summary_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             uuid::Uuid::new_v4().to_string(),
             &id,
@@ -303,6 +363,7 @@ pub fn save_minutes(
             &facts_json,
             &diarized_json,
             &participant_names_json,
+            &purge_summary_json,
             &now
         ],
     )
@@ -358,6 +419,7 @@ struct StoredMinuteRow {
     model_used: String,
     user_edited: bool,
     participant_names: Vec<String>,
+    purge_summary: Option<serde_json::Value>,
     created_at: String,
 }
 
@@ -379,6 +441,17 @@ fn latest_structured_minute(
                             LIMIT 1
                         )
                     ) AS participant_names_json,
+                    COALESCE(
+                        m.purge_summary_json,
+                        (
+                            SELECT v.purge_summary_json
+                            FROM minute_versions v
+                            WHERE v.minute_id = m.id
+                              AND v.purge_summary_json IS NOT NULL
+                            ORDER BY v.version_no DESC
+                            LIMIT 1
+                        )
+                    ) AS purge_summary_json,
                     m.created_at
              FROM minutes m
              WHERE m.meeting_id = ?1
@@ -403,7 +476,8 @@ fn latest_structured_minute(
             participant_names: parse_participant_names_json(
                 row.get::<_, Option<String>>(6)?.as_deref(),
             ),
-            created_at: row.get(7)?,
+            purge_summary: parse_purge_summary_json(row.get::<_, Option<String>>(7)?.as_deref()),
+            created_at: row.get(8)?,
         })
     });
 
@@ -572,6 +646,7 @@ pub(super) fn get_structured_minutes_by_meeting_record(
         "modelUsed": minute.model_used,
         "userEdited": minute.user_edited,
         "participantNames": minute.participant_names,
+        "purgeSummary": minute.purge_summary,
         "createdAt": minute.created_at,
         "decisions": decisions,
         "actions": actions,

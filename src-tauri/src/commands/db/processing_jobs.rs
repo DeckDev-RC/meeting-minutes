@@ -80,6 +80,41 @@ pub(super) fn upsert_processing_job_record(
     Ok(())
 }
 
+pub(super) fn finalize_processing_jobs_for_meeting_record(
+    db: &Connection,
+    meeting_id: &str,
+    meeting_status: &str,
+    now_rfc3339: &str,
+) -> Result<usize, String> {
+    match meeting_status {
+        "done" => db
+            .execute(
+                "UPDATE processing_jobs
+                 SET status = 'done',
+                     progress_pct = 100,
+                     error_msg = NULL,
+                     finished_at = COALESCE(finished_at, ?1),
+                     updated_at = ?1
+                 WHERE meeting_id = ?2 AND status IN ('pending', 'running')",
+                params![now_rfc3339, meeting_id],
+            )
+            .map_err(|e| e.to_string()),
+        "error" => db
+            .execute(
+                "UPDATE processing_jobs
+                 SET status = 'error',
+                     progress_pct = CASE WHEN progress_pct >= 100 THEN 99 ELSE progress_pct END,
+                     error_msg = COALESCE(error_msg, 'Processamento interrompido; use Retomar para continuar.'),
+                     finished_at = COALESCE(finished_at, ?1),
+                     updated_at = ?1
+                 WHERE meeting_id = ?2 AND status IN ('pending', 'running')",
+                params![now_rfc3339, meeting_id],
+            )
+            .map_err(|e| e.to_string()),
+        _ => Ok(0),
+    }
+}
+
 #[command]
 pub fn get_processing_jobs(
     state: tauri::State<'_, DbState>,
@@ -128,11 +163,41 @@ pub(super) fn reap_stale_processing_jobs_record(
     let cutoff = cutoff.to_rfc3339();
     let now = now.to_rfc3339();
 
+    let done_resolved = db
+        .execute(
+            "UPDATE processing_jobs
+             SET status = 'done',
+                 progress_pct = 100,
+                 error_msg = NULL,
+                 finished_at = COALESCE(finished_at, ?1),
+                 updated_at = ?1
+             WHERE status IN ('pending', 'running')
+               AND meeting_id IN (SELECT id FROM meetings WHERE status = 'done')",
+            params![&now],
+        )
+        .map_err(|e| e.to_string())?;
+
+    let error_resolved = db
+        .execute(
+            "UPDATE processing_jobs
+             SET status = 'error',
+                 progress_pct = CASE WHEN progress_pct >= 100 THEN 99 ELSE progress_pct END,
+                 error_msg = COALESCE(error_msg, 'Processamento interrompido; use Retomar para continuar.'),
+                 finished_at = COALESCE(finished_at, ?1),
+                 updated_at = ?1
+             WHERE status IN ('pending', 'running')
+               AND meeting_id IN (SELECT id FROM meetings WHERE status = 'error')",
+            params![&now],
+        )
+        .map_err(|e| e.to_string())?;
+
     let mut stmt = db
         .prepare(
             "SELECT DISTINCT meeting_id
              FROM processing_jobs
-             WHERE status IN ('pending', 'running') AND updated_at < ?1",
+             WHERE status IN ('pending', 'running')
+               AND updated_at < ?1
+               AND meeting_id NOT IN (SELECT id FROM meetings WHERE status IN ('done', 'error'))",
         )
         .map_err(|e| e.to_string())?;
     let affected_meetings = stmt
@@ -165,7 +230,7 @@ pub(super) fn reap_stale_processing_jobs_record(
         .map_err(|e| e.to_string())?;
     }
 
-    Ok(reaped)
+    Ok(done_resolved + error_resolved + reaped)
 }
 
 #[command]
@@ -225,6 +290,40 @@ mod tests {
             )
             .unwrap();
         assert_eq!(meeting_status, "error");
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn reaper_resolves_running_jobs_for_completed_meetings_as_done() {
+        let dir =
+            std::env::temp_dir().join(format!("meeting-minutes-reaper-{}", uuid::Uuid::new_v4()));
+        let conn = init_db(&dir);
+        conn.execute(
+            "INSERT INTO meetings (id, title, file_path, status, created_at, updated_at)
+             VALUES ('meeting-1', 'Teste', 'a.mp4', 'done', '2026-05-25T10:00:00Z', '2026-05-25T10:20:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO processing_jobs
+                (id, meeting_id, stage, status, progress_pct, error_msg, started_at, finished_at, created_at, updated_at)
+             VALUES ('job-1', 'meeting-1', 'generate', 'running', 97, NULL, NULL, NULL, '2026-05-25T10:00:00Z', ?1)",
+            params!["2026-05-25T10:20:00Z"],
+        )
+        .unwrap();
+
+        let reaped = reap_stale_processing_jobs_record(&conn, 60, "2026-05-25T10:30:00Z").unwrap();
+
+        assert_eq!(reaped, 1);
+        let row: (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status, progress_pct, error_msg FROM processing_jobs WHERE id = 'job-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("done".to_string(), 100, None));
 
         std::fs::remove_dir_all(dir).ok();
     }

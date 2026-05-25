@@ -35,6 +35,7 @@ function createExportSurface(minutesHtmlElement: HTMLElement) {
 
   const clone = minutesHtmlElement.cloneNode(true) as HTMLElement;
   clone.removeAttribute('id');
+  clone.removeAttribute('style');
   clone.classList.add('pdf-export-document');
   host.appendChild(clone);
 

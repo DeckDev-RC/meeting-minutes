@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS minute_versions (
     facts_json TEXT,
     diarized_json TEXT,
     participant_names_json TEXT,
+    purge_summary_json TEXT,
     change_reason TEXT,
     snapshot_json TEXT,
     created_at TEXT NOT NULL
@@ -301,9 +302,21 @@ pub(super) fn migrate_structured_minutes_schema(conn: &Connection) -> Result<(),
     )?;
     add_table_column_if_missing(
         conn,
+        "minutes",
+        "purge_summary_json",
+        "purge_summary_json TEXT",
+    )?;
+    add_table_column_if_missing(
+        conn,
         "minute_versions",
         "participant_names_json",
         "participant_names_json TEXT",
+    )?;
+    add_table_column_if_missing(
+        conn,
+        "minute_versions",
+        "purge_summary_json",
+        "purge_summary_json TEXT",
     )?;
     add_table_column_if_missing(
         conn,

@@ -139,11 +139,12 @@ export function buildGeminiChunkFactsPrompt(
     "You extract meeting facts for a benchmark. Return only valid JSON. Do not use markdown.",
     "",
     "Schema:",
-    '{"chunkIndex":number,"startSec":number,"endSec":number,"summary":"string","topics":["string"],"decisions":[{"title":"string","owner":"string","timestampSec":number,"evidence":"string"}],"actions":[{"task":"string","owner":"string","deadline":"string","timestampSec":number,"evidence":"string"}],"questions":["string"],"risks":["string"]}',
+    '{"chunkIndex":number,"startSec":number,"endSec":number,"summary":"string","topics":["string"],"topicEvidence":[{"title":"string","timestampSec":number,"evidence":"string"}],"decisions":[{"title":"string","owner":"string","timestampSec":number,"evidence":"string"}],"actions":[{"task":"string","owner":"string","deadline":"string","timestampSec":number,"evidence":"string"}],"questions":["string"],"risks":["string"]}',
     "",
     "Rules:",
     "- Keep summary under 240 characters.",
     "- Use empty arrays when no item is explicit.",
+    "- Add one topicEvidence item for each topic, with title exactly matching the topic.",
     "- Evidence must be short and copied or closely paraphrased from the transcript.",
     "- Use the transcript language.",
     "",
@@ -335,10 +336,22 @@ function normalizeInsights(
     endSec: chunk.endSec,
     summary: stringValue(parsed.summary) || fallbackSummary(chunk.text),
     topics: stringArray(parsed.topics).slice(0, 8),
+    topicEvidence: Array.isArray(parsed.topicEvidence)
+      ? parsed.topicEvidence.map(normalizeTopicEvidence).slice(0, 8)
+      : undefined,
     decisions: Array.isArray(parsed.decisions) ? parsed.decisions.map(normalizeDecision).slice(0, 8) : [],
     actions: Array.isArray(parsed.actions) ? parsed.actions.map(normalizeAction).slice(0, 12) : [],
     questions: stringArray(parsed.questions).slice(0, 8),
     risks: stringArray(parsed.risks).slice(0, 8),
+  };
+}
+
+function normalizeTopicEvidence(value: unknown) {
+  const item = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  return {
+    title: stringValue(item.title),
+    timestampSec: numberValue(item.timestampSec),
+    evidence: stringValue(item.evidence).slice(0, 160),
   };
 }
 

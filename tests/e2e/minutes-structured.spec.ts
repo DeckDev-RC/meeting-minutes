@@ -7,6 +7,7 @@ test.describe.configure({ timeout: 60_000 });
 
 async function installStructuredMinutesMock(page: Page) {
   await page.addInitScript(({ structuredId, legacyId }) => {
+    const savedPdfs: Array<{ suggestedName: string; size: number }> = [];
     window.__MEETING_MINUTES_E2E__ = {
       listen: async () => () => undefined,
       invoke: async (command, args = {}) => {
@@ -20,6 +21,14 @@ async function installStructuredMinutesMock(page: Page) {
               "<section><h1>Ata estruturada</h1><p>Resumo final estruturado.</p></section>",
             pdfPath: null,
             modelUsed: "gemini-2.5-flash",
+            userEdited: false,
+            participantNames: ["Caio", "Rafaela"],
+            purgeSummary: {
+              removedTopics: 1,
+              removedDecisions: 1,
+              removedActions: 1,
+              removedTotal: 3,
+            },
             createdAt: "2026-05-23T11:00:00Z",
             decisions: [
               {
@@ -146,9 +155,30 @@ async function installStructuredMinutesMock(page: Page) {
           return null;
         }
 
+        if (command === "save_pdf") {
+          const bytes = Array.isArray(args.pdfBytes) ? args.pdfBytes : [];
+          savedPdfs.push({
+            suggestedName: String(args.suggestedName ?? ""),
+            size: bytes.length,
+          });
+          (window as typeof window & { __SAVED_PDFS__?: typeof savedPdfs }).__SAVED_PDFS__ =
+            savedPdfs;
+          return `C:\\exports\\${String(args.suggestedName ?? "ata.pdf")}`;
+        }
+
+        if (command === "save_html") {
+          return `C:\\exports\\${String(args.suggestedName ?? "ata.html")}`;
+        }
+
+        if (command === "open_folder") {
+          return undefined;
+        }
+
         throw new Error(`Unhandled mock command: ${command}`);
       },
     };
+    (window as typeof window & { __SAVED_PDFS__?: typeof savedPdfs }).__SAVED_PDFS__ =
+      savedPdfs;
   }, { structuredId: structuredMeetingId, legacyId: legacyMeetingId });
 }
 
@@ -173,6 +203,8 @@ test("minutes page renders structured decisions actions and evidence tabs", asyn
   await expect(page.getByText("Evidencias fracas").first()).toBeVisible();
   await expect(page.getByText("Resumo final estruturado.")).toBeVisible();
   await expect(page.getByText("1 evidencia precisa de revisao")).toBeVisible();
+  await expect(page.getByText("Purge anti-alucinacao removeu 3 itens sem evidencia")).toBeVisible();
+  await expect(page.getByText("1 topico, 1 decisao, 1 acao")).toBeVisible();
 
   await page.getByRole("button", { name: /Decisoes\s*1/ }).click();
   await expect(page.getByRole("heading", { name: "Decisoes estruturadas" })).toBeVisible();
@@ -201,4 +233,55 @@ test("minutes page falls back to legacy html when structured data is absent", as
   await expect(page.getByText("Ata antiga sem estrutura persistida")).toBeVisible();
   await page.getByRole("button", { name: /Insights\s*1/ }).click();
   await expect(page.getByText("Resumo legado por chunk.")).toBeVisible();
+});
+
+test("executive PDF export renders content and dark menu keeps readable colors", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("meeting-minutes-theme", "dark");
+  });
+  await page.goto(`/minutes/${structuredMeetingId}`);
+
+  await expect(page.getByRole("heading", { name: "Ata da reuniao" })).toBeVisible({
+    timeout: 45_000,
+  });
+  await page.getByLabel("Abrir opcoes de exportacao").click();
+  const executiveMenuItem = page.getByRole("button", { name: "PDF executivo" }).nth(1);
+  await expect(executiveMenuItem).toBeVisible();
+  const menuColors = await executiveMenuItem.evaluate((element) => {
+    const style = window.getComputedStyle(element);
+    const parentStyle = window.getComputedStyle(element.parentElement as Element);
+    return {
+      color: style.color,
+      backgroundColor: parentStyle.backgroundColor,
+    };
+  });
+  expect(menuColors.color).not.toBe(menuColors.backgroundColor);
+
+  await executiveMenuItem.click();
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => {
+          const saved =
+            (window as typeof window & {
+              __SAVED_PDFS__?: Array<{ suggestedName: string; size: number }>;
+            }).__SAVED_PDFS__ ?? [];
+          return saved.at(-1) ?? null;
+        }),
+      { timeout: 30_000 },
+    )
+    .toEqual(
+      expect.objectContaining({
+        suggestedName: expect.stringContaining("executiva.pdf"),
+        size: expect.any(Number),
+      }),
+    );
+  const pdfSize = await page.evaluate(() => {
+    const saved =
+      (window as typeof window & {
+        __SAVED_PDFS__?: Array<{ suggestedName: string; size: number }>;
+      }).__SAVED_PDFS__ ?? [];
+    return saved.at(-1)?.size ?? 0;
+  });
+  expect(pdfSize).toBeGreaterThan(10_000);
 });

@@ -2,6 +2,7 @@ import { invoke as tauriInvoke } from '@tauri-apps/api/core';
 import type {
   DiarizedResult,
   DiarizationOptions,
+  EvidencePurgeSummary,
   ExportedChunk,
   LocalTranscriptionChunkResult,
   Meeting,
@@ -375,16 +376,19 @@ export const saveMinutes = (
   pdfPath?: string,
   factsJson?: string,
   diarizedJson?: string,
-  participantNames?: string[]
+  participantNames?: string[],
+  modelUsed = 'meeting-minutes-local-v1',
+  purgeSummary?: EvidencePurgeSummary
 ) =>
   invoke<void>('save_minutes', {
     meetingId,
     htmlContent,
     pdfPath,
-    modelUsed: 'gemini-2.5-flash',
+    modelUsed,
     factsJson,
     diarizedJson,
     participantNames,
+    purgeSummary,
   });
 
 export const getMinutesByMeeting = (meetingId: string) =>

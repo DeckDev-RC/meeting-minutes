@@ -12,6 +12,15 @@ fn normalize_insights(
     insights.chunk_index = chunk_index;
     insights.start_sec = start_sec;
     insights.end_sec = end_sec;
+    if insights.topics.is_empty() && !insights.topic_evidence.is_empty() {
+        insights.topics = insights
+            .topic_evidence
+            .iter()
+            .map(|topic| topic.title.trim())
+            .filter(|title| !title.is_empty())
+            .map(str::to_string)
+            .collect();
+    }
     insights
 }
 
@@ -59,6 +68,7 @@ fn fallback_chunk_insights(
         end_sec,
         summary,
         topics: vec!["Trecho da reuniao".to_string()],
+        topic_evidence: Vec::new(),
         decisions: Vec::new(),
         actions: Vec::new(),
         questions: Vec::new(),
@@ -149,6 +159,19 @@ fn chunk_fact_schema() -> serde_json::Value {
             "endSec": { "type": "number" },
             "summary": { "type": "string" },
             "topics": { "type": "array", "items": { "type": "string" } },
+            "topicEvidence": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string" },
+                        "timestampSec": { "type": "number" },
+                        "evidence": { "type": "string" }
+                    },
+                    "required": ["title", "timestampSec", "evidence"],
+                    "additionalProperties": false
+                }
+            },
             "decisions": {
                 "type": "array",
                 "items": {
@@ -187,6 +210,7 @@ fn chunk_fact_schema() -> serde_json::Value {
             "endSec",
             "summary",
             "topics",
+            "topicEvidence",
             "decisions",
             "actions",
             "questions",

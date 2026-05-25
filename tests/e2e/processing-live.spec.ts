@@ -2,13 +2,15 @@ import { expect, test, type Page } from "@playwright/test";
 
 const meetingId = "e2e-ui-meeting";
 
-test.describe.configure({ timeout: 60_000 });
+test.describe.configure({ timeout: 90_000 });
 
 async function installTauriMock(page: Page) {
   await page.addInitScript((id) => {
     const delay = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
     const listeners = new Map<string, Set<(event: { payload: unknown }) => void>>();
     const processingJobs: Array<Record<string, unknown>> = [];
+    const savedMinutes: Array<Record<string, unknown>> = [];
+    const savedBenchmarkRuns: Array<Record<string, unknown>> = [];
     const chunks = [
       {
         index: 0,
@@ -190,7 +192,38 @@ async function installTauriMock(page: Page) {
               chunkIndex === 0
                 ? "Equipe alinhou ajustes no leitor de PDF e saida em planilha."
                 : "Responsaveis e prazo foram definidos para finalizar a entrega.",
-            topics: chunkIndex === 0 ? ["Leitor de PDF", "Planilha"] : ["Drive", "Prazo"],
+            topics: chunkIndex === 0 ? ["Leitor de PDF", "Planilha", "Orcamento"] : ["Drive", "Prazo"],
+            topicEvidence:
+              chunkIndex === 0
+                ? [
+                    {
+                      title: "Leitor de PDF",
+                      timestampSec: 4,
+                      evidence: "ajustar o leitor de PDF",
+                    },
+                    {
+                      title: "Planilha",
+                      timestampSec: 24,
+                      evidence: "planilha deve sair no formato final",
+                    },
+                    {
+                      title: "Orcamento",
+                      timestampSec: 26,
+                      evidence: "orcamento internacional aprovado",
+                    },
+                  ]
+                : [
+                    {
+                      title: "Drive",
+                      timestampSec: 122,
+                      evidence: "Caio fica responsavel pelo drive",
+                    },
+                    {
+                      title: "Prazo",
+                      timestampSec: 136,
+                      evidence: "prazo combinado foi sexta-feira",
+                    },
+                  ],
             decisions:
               chunkIndex === 0
                 ? [
@@ -199,6 +232,12 @@ async function installTauriMock(page: Page) {
                       owner: "Caio",
                       timestampSec: 24,
                       evidence: "planilha deve sair no formato final",
+                    },
+                    {
+                      title: "Aprovar orcamento internacional",
+                      owner: "Caio",
+                      timestampSec: 26,
+                      evidence: "orcamento internacional aprovado",
                     },
                   ]
                 : [],
@@ -212,13 +251,29 @@ async function installTauriMock(page: Page) {
                       timestampSec: 128,
                       evidence: "revisa a base de clientes",
                     },
+                    {
+                      task: "Contratar fornecedor externo",
+                      owner: "Financeiro",
+                      deadline: "sexta-feira",
+                      timestampSec: 136,
+                      evidence: "fornecedor externo foi aprovado por todos",
+                    },
                   ]
                 : [],
             questions: [],
             risks: chunkIndex === 0 ? ["Falha no processamento de PDF"] : [],
           };
         }
-        if (command === "save_transcription" || command === "save_benchmark_run") {
+        if (command === "save_transcription") {
+          return undefined;
+        }
+        if (command === "save_benchmark_run") {
+          savedBenchmarkRuns.push({
+            path: args.path,
+            content: JSON.parse(String(args.content ?? "{}")),
+          });
+          (window as typeof window & { __SAVED_BENCHMARK_RUNS__?: typeof savedBenchmarkRuns })
+            .__SAVED_BENCHMARK_RUNS__ = savedBenchmarkRuns;
           return undefined;
         }
         if (command === "generate_ata_from_facts_streaming") {
@@ -245,6 +300,9 @@ async function installTauriMock(page: Page) {
           return html;
         }
         if (command === "save_minutes") {
+          savedMinutes.push(args);
+          (window as typeof window & { __SAVED_MINUTES__?: typeof savedMinutes })
+            .__SAVED_MINUTES__ = savedMinutes;
           await delay(10_000);
           return undefined;
         }
@@ -265,6 +323,10 @@ async function installTauriMock(page: Page) {
     };
     (window as typeof window & { __PROCESSING_JOB_UPSERTS__?: typeof processingJobs })
       .__PROCESSING_JOB_UPSERTS__ = processingJobs;
+    (window as typeof window & { __SAVED_MINUTES__?: typeof savedMinutes })
+      .__SAVED_MINUTES__ = savedMinutes;
+    (window as typeof window & { __SAVED_BENCHMARK_RUNS__?: typeof savedBenchmarkRuns })
+      .__SAVED_BENCHMARK_RUNS__ = savedBenchmarkRuns;
   }, meetingId);
 }
 
@@ -387,6 +449,11 @@ test("processing live panel renders readable transcript, insights, streamed minu
   await expect(panel.getByText("Processamento iniciado.")).toBeVisible();
   await expect(panel.getByText(/Cloudflare Whisper indisponivel/)).toBeVisible();
   await expect(panel.getByText(/usando fallback Deepgram Nova-3/).first()).toBeVisible();
+  await expect(
+    panel.getByText(
+      "Purge anti-alucinacao removeu 1 topico, 1 decisao e 1 acao sem evidencia na transcricao.",
+    ),
+  ).toBeVisible();
   await expect(panel.getByText("Ata final recebida.")).toBeVisible();
   await expect(panel.getByText("Ata final gerada.")).toBeVisible();
 
@@ -429,6 +496,75 @@ test("processing live panel renders readable transcript, insights, streamed minu
         { stage: "complete", status: "done", progressPct: 100 },
       ]),
     );
+
+  await expect
+    .poll(
+      async () =>
+        page.evaluate(() => {
+          const saved =
+            (window as typeof window & {
+              __SAVED_MINUTES__?: Array<Record<string, unknown>>;
+            }).__SAVED_MINUTES__ ?? [];
+          return saved.at(-1)?.modelUsed;
+        }),
+      { timeout: 20_000 },
+    )
+    .toBe("meeting-minutes-local-v1-balanced");
+
+  await expect
+    .poll(
+      async () =>
+        page.evaluate(() => {
+          const saved =
+            (window as typeof window & {
+              __SAVED_MINUTES__?: Array<Record<string, unknown>>;
+            }).__SAVED_MINUTES__ ?? [];
+          return saved.at(-1)?.purgeSummary;
+        }),
+      { timeout: 20_000 },
+    )
+    .toEqual({
+      removedTopics: 1,
+      removedDecisions: 1,
+      removedActions: 1,
+      removedTotal: 3,
+    });
+
+  await expect
+    .poll(
+      async () =>
+        page.evaluate(() => {
+          const saved =
+            (window as typeof window & {
+              __SAVED_MINUTES__?: Array<Record<string, unknown>>;
+            }).__SAVED_MINUTES__ ?? [];
+          const facts = JSON.parse(String(saved.at(-1)?.factsJson ?? "[]")) as Array<{
+            topics?: string[];
+          }>;
+          return facts.flatMap((fact) => fact.topics ?? []);
+        }),
+      { timeout: 20_000 },
+    )
+    .toEqual(["Leitor de PDF", "Planilha", "Drive", "Prazo"]);
+
+  await expect
+    .poll(
+      async () =>
+        page.evaluate(() => {
+          const saved =
+            (window as typeof window & {
+              __SAVED_BENCHMARK_RUNS__?: Array<Record<string, unknown>>;
+            }).__SAVED_BENCHMARK_RUNS__ ?? [];
+          return saved.at(-1)?.content?.cases?.[0]?.metadata?.purgeSummary;
+        }),
+      { timeout: 20_000 },
+    )
+    .toEqual({
+      removedTopics: 1,
+      removedDecisions: 1,
+      removedActions: 1,
+      removedTotal: 3,
+    });
 });
 
 test("processing live panel remains usable on mobile viewport", async ({ page }, testInfo) => {

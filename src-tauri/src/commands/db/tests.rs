@@ -307,6 +307,7 @@ fn structured_minutes_persistence_writes_items_and_validated_evidence() {
         end_sec: 60.0,
         summary: "Alinhamento de contratos.".to_string(),
         topics: vec!["Contratos".to_string()],
+        topic_evidence: vec![],
         decisions: vec![MeetingDecision {
             title: "Revisar contrato".to_string(),
             owner: "Caio".to_string(),
@@ -344,6 +345,89 @@ fn structured_minutes_persistence_writes_items_and_validated_evidence() {
 }
 
 #[test]
+fn structured_minutes_persistence_purges_items_with_invalid_evidence() {
+    let dir = temp_app_dir("structured-minutes-purge-invalid");
+    let mut conn = init_db(&dir);
+    conn.execute(
+            "INSERT INTO processing_chunks
+                (meeting_id, index_no, audio_path, start_sec, end_sec, offset_sec, duration_sec, status, raw_segments_json, created_at, updated_at)
+             VALUES ('meeting-1', 0, 'chunk.flac', 0, 60, 0, 60, 'done', ?1, 'now', 'now')",
+            params![serde_json::json!([
+                { "id": 0, "start": 0.0, "end": 5.0, "text": "Caio aprovou a entrega final." },
+                { "id": 1, "start": 5.0, "end": 9.0, "text": "Maria envia o resumo revisado hoje." }
+            ])
+            .to_string()],
+        )
+        .unwrap();
+    let facts = vec![MeetingChunkInsights {
+        chunk_index: 0,
+        start_sec: 0.0,
+        end_sec: 60.0,
+        summary: "Alinhamento final.".to_string(),
+        topics: vec!["Entrega".to_string()],
+        topic_evidence: vec![],
+        decisions: vec![
+            MeetingDecision {
+                title: "Aprovar entrega".to_string(),
+                owner: "Caio".to_string(),
+                timestamp_sec: 3.0,
+                evidence: "Caio aprovou a entrega final".to_string(),
+            },
+            MeetingDecision {
+                title: "Cortar escopo".to_string(),
+                owner: "Equipe".to_string(),
+                timestamp_sec: 8.0,
+                evidence: "essa frase nunca apareceu na transcricao".to_string(),
+            },
+        ],
+        actions: vec![
+            MeetingAction {
+                task: "Enviar resumo".to_string(),
+                owner: "Maria".to_string(),
+                deadline: "hoje".to_string(),
+                timestamp_sec: 7.0,
+                evidence: "Maria envia o resumo revisado hoje".to_string(),
+            },
+            MeetingAction {
+                task: "Contratar fornecedor".to_string(),
+                owner: "Financeiro".to_string(),
+                deadline: "sexta".to_string(),
+                timestamp_sec: 12.0,
+                evidence: "fornecedor externo foi aprovado por todos".to_string(),
+            },
+        ],
+        questions: vec![],
+        risks: vec![],
+    }];
+
+    let tx = conn.transaction().unwrap();
+    persist_structured_minutes(&tx, "minute-1", "meeting-1", &facts, "now").unwrap();
+    tx.commit().unwrap();
+
+    assert_eq!(row_count(&conn, "minute_decisions"), 1);
+    assert_eq!(row_count(&conn, "minute_actions"), 1);
+    assert_eq!(row_count(&conn, "minute_evidences"), 2);
+    let title: String = conn
+        .query_row("SELECT title FROM minute_decisions", [], |row| row.get(0))
+        .unwrap();
+    let task: String = conn
+        .query_row("SELECT task FROM minute_actions", [], |row| row.get(0))
+        .unwrap();
+    let weak_evidences: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM minute_evidences WHERE validated = 0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(title, "Aprovar entrega");
+    assert_eq!(task, "Enviar resumo");
+    assert_eq!(weak_evidences, 0);
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn structured_minutes_reader_returns_latest_minute_items_versions_and_evidences() {
     let dir = temp_app_dir("structured-minutes-reader");
     let conn = init_db(&dir);
@@ -354,8 +438,20 @@ fn structured_minutes_reader_returns_latest_minute_items_versions_and_evidences(
         )
         .unwrap();
     conn.execute(
+            "INSERT INTO minutes (id, meeting_id, html_content, pdf_path, model_used, purge_summary_json, created_at)
+             VALUES ('minute-2', 'meeting-1', '<h1>Atual</h1>', 'ata.pdf', 'gemini-2.5-flash', ?1, '2026-05-23T11:00:00Z')",
+            params![serde_json::json!({
+                "removedTopics": 1,
+                "removedDecisions": 1,
+                "removedActions": 1,
+                "removedTotal": 3
+            })
+            .to_string()],
+        )
+        .unwrap();
+    conn.execute(
             "INSERT INTO minutes (id, meeting_id, html_content, pdf_path, model_used, created_at)
-             VALUES ('minute-2', 'meeting-1', '<h1>Atual</h1>', 'ata.pdf', 'gemini-2.5-flash', '2026-05-23T11:00:00Z')",
+             VALUES ('minute-3', 'meeting-with-version-purge', '<h1>Atual</h1>', NULL, 'gemini-2.5-flash', '2026-05-23T12:00:00Z')",
             [],
         )
         .unwrap();
@@ -371,6 +467,19 @@ fn structured_minutes_reader_returns_latest_minute_items_versions_and_evidences(
                 (id, minute_id, meeting_id, version_no, html_content, facts_json, diarized_json, participant_names_json, created_at)
              VALUES ('version-1', 'minute-2', 'meeting-1', 1, '<h1>Atual</h1>', '[]', '{}', '[\"Caio\"]', '2026-05-23T11:00:00Z')",
             [],
+        )
+        .unwrap();
+    conn.execute(
+            "INSERT INTO minute_versions
+                (id, minute_id, meeting_id, version_no, html_content, facts_json, diarized_json, purge_summary_json, created_at)
+             VALUES ('version-purge', 'minute-3', 'meeting-with-version-purge', 1, '<h1>Atual</h1>', '[]', '{}', ?1, '2026-05-23T12:00:00Z')",
+            params![serde_json::json!({
+                "removedTopics": 0,
+                "removedDecisions": 0,
+                "removedActions": 1,
+                "removedTotal": 1
+            })
+            .to_string()],
         )
         .unwrap();
     conn.execute(
@@ -406,6 +515,10 @@ fn structured_minutes_reader_returns_latest_minute_items_versions_and_evidences(
     assert_eq!(structured["htmlContent"], "<h1>Atual</h1>");
     assert_eq!(structured["modelUsed"], "gemini-2.5-flash");
     assert_eq!(structured["participantNames"][0], "Caio");
+    assert_eq!(structured["purgeSummary"]["removedTotal"], 3);
+    assert_eq!(structured["purgeSummary"]["removedTopics"], 1);
+    assert_eq!(structured["purgeSummary"]["removedDecisions"], 1);
+    assert_eq!(structured["purgeSummary"]["removedActions"], 1);
     assert_eq!(structured["decisions"][0]["title"], "Aprovar entrega");
     assert_eq!(structured["decisions"][0]["evidenceId"], "evidence-1");
     assert_eq!(structured["actions"][0]["task"], "Revisar Drive");
@@ -420,6 +533,14 @@ fn structured_minutes_reader_returns_latest_minute_items_versions_and_evidences(
     assert_eq!(evidences.len(), 2);
     assert_eq!(evidences[0]["parentType"], "decision");
     assert_eq!(evidences[1]["validated"], false);
+
+    let version_purge =
+        get_structured_minutes_by_meeting_record(&conn, "meeting-with-version-purge")
+            .unwrap()
+            .unwrap();
+    assert_eq!(version_purge["purgeSummary"]["removedTotal"], 1);
+    assert_eq!(version_purge["purgeSummary"]["removedTopics"], 0);
+    assert_eq!(version_purge["purgeSummary"]["removedActions"], 1);
 
     std::fs::remove_dir_all(dir).ok();
 }
@@ -453,6 +574,8 @@ fn init_db_creates_phase_two_review_columns() {
 
     assert!(minutes.contains("user_edited"));
     assert!(minutes.contains("participant_names_json"));
+    assert!(minutes.contains("purge_summary_json"));
+    assert!(versions.contains("purge_summary_json"));
     assert!(versions.contains("change_reason"));
     assert!(versions.contains("snapshot_json"));
     assert!(actions.contains("status"));

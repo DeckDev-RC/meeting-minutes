@@ -59,6 +59,7 @@ pub fn init_db(app_data_dir: &std::path::Path) -> Connection {
             model_used TEXT NOT NULL,
             user_edited INTEGER NOT NULL DEFAULT 0,
             participant_names_json TEXT,
+            purge_summary_json TEXT,
             created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS jobs (
