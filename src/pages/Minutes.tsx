@@ -42,6 +42,7 @@ import {
   parseSpeakerMapJson,
   type SpeakerMap,
 } from "../lib/speakerMap";
+import { buildExecutiveMinutesHtml } from "../lib/executiveMinutes";
 import {
   StructuredActionsPanel,
   StructuredDecisionsPanel,
@@ -529,6 +530,16 @@ export default function Minutes() {
     () => (activeHtml ? applySpeakerMapToText(activeHtml, speakerMap) : null),
     [activeHtml, speakerMap],
   );
+  const executiveHtml = useMemo(
+    () =>
+      structuredMinutes
+        ? applySpeakerMapToText(
+            buildExecutiveMinutesHtml(structuredMinutes, { title: "Ata Executiva" }),
+            speakerMap,
+          )
+        : null,
+    [speakerMap, structuredMinutes],
+  );
   const structuredEvidencesById = useMemo(
     () => new Map((structuredMinutes?.evidences ?? []).map((evidence) => [evidence.id, evidence])),
     [structuredMinutes],
@@ -687,7 +698,7 @@ export default function Minutes() {
               Participantes
             </CommandButton>
           )}
-          {activeTab === "minutes" && <ExportButton title={title} />}
+          {activeTab === "minutes" && <ExportButton title={title} executiveHtml={executiveHtml} />}
         </div>
       </div>
 

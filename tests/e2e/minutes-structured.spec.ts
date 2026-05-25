@@ -165,6 +165,10 @@ test("minutes page renders structured decisions actions and evidence tabs", asyn
   await expect(page.getByRole("heading", { name: "Central de revisao" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Revisar evidencias" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Mapear falantes" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "PDF executivo" })).toBeVisible();
+  await page.getByLabel("Abrir opcoes de exportacao").click();
+  await expect(page.getByRole("button", { name: "PDF completo" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "HTML completo" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Fila de revisao" })).toBeVisible();
   await expect(page.getByText("Evidencias fracas").first()).toBeVisible();
   await expect(page.getByText("Resumo final estruturado.")).toBeVisible();

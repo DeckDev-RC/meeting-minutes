@@ -62,6 +62,29 @@ pub async fn save_pdf(
 }
 
 #[command]
+pub async fn save_html(
+    app: tauri::AppHandle,
+    html_content: String,
+    suggested_name: String,
+) -> Result<String, String> {
+    let file_path = app
+        .dialog()
+        .file()
+        .set_file_name(&suggested_name)
+        .add_filter("HTML", &["html", "htm"])
+        .blocking_save_file();
+
+    match file_path {
+        Some(path) => {
+            let path_str = path.to_string();
+            fs::write(&path_str, html_content).map_err(|e| e.to_string())?;
+            Ok(path_str)
+        }
+        None => Err("Save cancelled".to_string()),
+    }
+}
+
+#[command]
 pub async fn open_folder(path: String) -> Result<(), String> {
     let p = Path::new(&path);
     let folder = if p.is_file() {

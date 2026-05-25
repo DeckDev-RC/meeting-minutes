@@ -434,6 +434,9 @@ export const restoreMinuteVersion = (versionId: string) =>
 export const savePdf = (pdfBytes: number[], suggestedName: string) =>
   invoke<string>('save_pdf', { pdfBytes, suggestedName });
 
+export const saveHtml = (htmlContent: string, suggestedName: string) =>
+  invoke<string>('save_html', { htmlContent, suggestedName });
+
 export const saveBenchmarkRun = (path: string, content: string) =>
   invoke<string>('save_benchmark_run', { path, content });
 

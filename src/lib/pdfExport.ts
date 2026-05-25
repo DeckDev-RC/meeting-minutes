@@ -1,9 +1,27 @@
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
-import { choosePdfRenderStrategy, planPdfPageSlices, type PdfPageSlice } from './pdfLayout';
+import {
+  choosePdfRenderStrategy,
+  planPdfPageSlices,
+  type PdfKeepRange,
+  type PdfPageSlice,
+} from './pdfLayout';
 
 const EXPORT_WIDTH_PX = 794;
 const PDF_CANVAS_SCALE = 2;
+const PDF_KEEP_SELECTORS = [
+  '.header',
+  '.section',
+  '.summary-box',
+  '.decision-list > li',
+  '.timeline-list > li',
+  '.trace-list > li',
+  '.question-list > li',
+  '.risk-list > li',
+  '.table-actions tr',
+  'blockquote',
+  'h2',
+].join(',');
 
 function createExportSurface(minutesHtmlElement: HTMLElement) {
   const host = document.createElement('div');
@@ -81,6 +99,33 @@ function addPageFooter(pdf: jsPDF, pageNumber: number, pageCount: number, title:
   pdf.text(`Pagina ${pageNumber} de ${pageCount}`, pageWidth - margin, pageHeight - 7, {
     align: 'right',
   });
+}
+
+function collectPdfKeepRanges(host: HTMLElement, pageContentHeightPx: number): PdfKeepRange[] {
+  const hostRect = host.getBoundingClientRect();
+  const maxKeepHeight = Math.max(24, pageContentHeightPx * 0.92);
+  const ranges: PdfKeepRange[] = [];
+
+  host.querySelectorAll<HTMLElement>(PDF_KEEP_SELECTORS).forEach((element) => {
+    const rect = element.getBoundingClientRect();
+    const top = rect.top - hostRect.top;
+    const bottom = rect.bottom - hostRect.top;
+    const height = bottom - top;
+
+    if (!Number.isFinite(top) || !Number.isFinite(bottom)) return;
+    if (height <= 1 || height > maxKeepHeight) return;
+
+    ranges.push({
+      top,
+      bottom,
+      reason:
+        element.tagName.toLowerCase() === 'tr'
+          ? 'table-row'
+          : element.className?.toString() || element.tagName.toLowerCase(),
+    });
+  });
+
+  return ranges;
 }
 
 function addCanvasPage(
@@ -170,16 +215,22 @@ export async function exportToPDF(
     await document.fonts?.ready;
 
     const pageContentHeight = pageHeight - margin * 2 - footerSpace;
+    const pageContentHeightPx = Math.max(
+      1,
+      Math.floor((pageContentHeight / contentWidth) * EXPORT_WIDTH_PX),
+    );
     const documentHeightPx = Math.max(
       surface.host.scrollHeight,
       Math.ceil(surface.host.getBoundingClientRect().height),
       1,
     );
+    const keepRanges = collectPdfKeepRanges(surface.host, pageContentHeightPx);
     const pageSlices = planPdfPageSlices({
       documentHeightPx,
       exportWidthPx: EXPORT_WIDTH_PX,
       contentWidthMm: contentWidth,
       pageContentHeightMm: pageContentHeight,
+      keepRanges,
     });
 
     const renderStrategy = choosePdfRenderStrategy({

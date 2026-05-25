@@ -268,6 +268,7 @@ pub fn run() {
             commands::db::delete_meeting,
             commands::storage::resolve_processing_work_dir,
             commands::storage::save_pdf,
+            commands::storage::save_html,
             commands::storage::save_benchmark_run,
             commands::storage::open_folder,
             commands::keyring::get_api_secret,

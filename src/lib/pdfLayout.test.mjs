@@ -83,3 +83,53 @@ assert.deepEqual(
   }),
   { mode: "paged-canvas", estimatedPixels: 38_400_000 },
 );
+
+assert.deepEqual(
+  planPdfPageSlices({
+    documentHeightPx: 2400,
+    exportWidthPx: 800,
+    contentWidthMm: 160,
+    pageContentHeightMm: 200,
+    keepRanges: [{ top: 920, bottom: 1160, reason: "decision-card" }],
+  }),
+  [
+    { sourceY: 0, sourceHeight: 920, outputHeightMm: 184 },
+    { sourceY: 920, sourceHeight: 1000, outputHeightMm: 200 },
+    { sourceY: 1920, sourceHeight: 480, outputHeightMm: 96 },
+  ],
+);
+
+assert.deepEqual(
+  planPdfPageSlices({
+    documentHeightPx: 1800,
+    exportWidthPx: 800,
+    contentWidthMm: 160,
+    pageContentHeightMm: 200,
+    keepRanges: [
+      { top: 820, bottom: 980, reason: "decision-card-2" },
+      { top: 980, bottom: 1140, reason: "decision-card-3" },
+    ],
+  }),
+  [
+    { sourceY: 0, sourceHeight: 980, outputHeightMm: 196 },
+    { sourceY: 980, sourceHeight: 820, outputHeightMm: 164 },
+  ],
+);
+
+assert.deepEqual(
+  planPdfPageSlices({
+    documentHeightPx: 2400,
+    exportWidthPx: 800,
+    contentWidthMm: 160,
+    pageContentHeightMm: 200,
+    keepRanges: [
+      { top: 990, bottom: 1040, reason: "table-row" },
+      { top: 1960, bottom: 2010, reason: "table-row" },
+    ],
+  }),
+  [
+    { sourceY: 0, sourceHeight: 990, outputHeightMm: 198 },
+    { sourceY: 990, sourceHeight: 970, outputHeightMm: 194 },
+    { sourceY: 1960, sourceHeight: 440, outputHeightMm: 88 },
+  ],
+);
