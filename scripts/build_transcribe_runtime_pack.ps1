@@ -129,6 +129,21 @@ function Write-Utf8NoBom([string]$PathValue, [string]$Content) {
   [System.IO.File]::WriteAllText((Resolve-FullPath $PathValue), $Content, $encoding)
 }
 
+function Get-Sha256Hex([string]$PathValue) {
+  $stream = [System.IO.File]::OpenRead((Resolve-FullPath $PathValue))
+  try {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      $hash = $sha.ComputeHash($stream)
+      return ([System.BitConverter]::ToString($hash)).Replace("-", "").ToLowerInvariant()
+    } finally {
+      $sha.Dispose()
+    }
+  } finally {
+    $stream.Dispose()
+  }
+}
+
 $projectRootPath = Resolve-FullPath $ProjectRoot
 $includeModelFlag = $IncludeModel -notmatch "^(false|0|no)$"
 if (-not (Test-Path -LiteralPath $projectRootPath -PathType Container)) {
@@ -222,7 +237,7 @@ download_model("$Model", output_dir=r"$modelDir")
     $pack = Get-Item -LiteralPath $packPath
     Write-Output "PackPath=$($pack.FullName)"
     Write-Output "PackBytes=$($pack.Length)"
-    Write-Output "PackSha256=$((Get-FileHash -Algorithm SHA256 -LiteralPath $pack.FullName).Hash.ToLowerInvariant())"
+    Write-Output "PackSha256=$(Get-Sha256Hex $pack.FullName)"
   }
 } finally {
   if (Test-Path -LiteralPath $stagingRoot) {
