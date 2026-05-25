@@ -36,6 +36,18 @@ import {
 } from "./pipelineRunner";
 export { PROFILE_LABELS } from "./profiles";
 
+const PROCESSING_JOB_STAGE_ORDER: PipelinePhase[] = [
+  "prepare_audio",
+  "detect_speech",
+  "create_chunks",
+  "transcribe",
+  "diarize",
+  "extract_facts",
+  "wait_speakers",
+  "generate",
+  "complete",
+];
+
 type MinutesStreamPayload = {
   meetingId: string;
   delta: string;
@@ -63,6 +75,8 @@ export function useProcessingPipeline() {
   const minutesStreamRenderTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
   const minutesStreamRawRef = useRef("");
   const processingJobSnapshotRef = useRef(new Map<string, string>());
+  const runningProcessingStagesRef = useRef(new Set<PipelinePhase>());
+  const completedProcessingStagesRef = useRef(new Set<PipelinePhase>());
   const [runProfile, setRunProfile] = useState<ProcessingProfile>("balanced");
   const [liveState, setLiveState] = useState<LiveProcessingState>(() =>
     createLiveProcessingState(),
@@ -125,6 +139,30 @@ export function useProcessingPipeline() {
     });
   };
 
+  const closeProcessingStage = (meetingId: string, stage: PipelinePhase) => {
+    if (completedProcessingStagesRef.current.has(stage)) return;
+    completedProcessingStagesRef.current.add(stage);
+    runningProcessingStagesRef.current.delete(stage);
+    recordProcessingJob(meetingId, stage, "done", 100);
+  };
+
+  const closePreviousProcessingStages = (meetingId: string, phase: PipelinePhase) => {
+    if (phase === "complete") {
+      for (const stage of Array.from(runningProcessingStagesRef.current)) {
+        closeProcessingStage(meetingId, stage);
+      }
+      return;
+    }
+
+    const phaseIndex = PROCESSING_JOB_STAGE_ORDER.indexOf(phase);
+    for (const stage of Array.from(runningProcessingStagesRef.current)) {
+      const stageIndex = PROCESSING_JOB_STAGE_ORDER.indexOf(stage);
+      if (stageIndex >= 0 && stageIndex < phaseIndex) {
+        closeProcessingStage(meetingId, stage);
+      }
+    }
+  };
+
   const flushMinutesStreamPreview = (meetingId: string) => {
     if (minutesStreamRenderTimerRef.current) {
       window.clearTimeout(minutesStreamRenderTimerRef.current);
@@ -176,12 +214,13 @@ export function useProcessingPipeline() {
       elapsedMs: Date.now() - startedAtRef.current,
     });
     if (id) {
-      recordProcessingJob(
-        id,
-        phase,
-        phase === "complete" ? "done" : "running",
-        view.percent,
-      );
+      closePreviousProcessingStages(id, phase);
+      if (phase === "complete") {
+        closeProcessingStage(id, phase);
+      } else if (!completedProcessingStagesRef.current.has(phase)) {
+        runningProcessingStagesRef.current.add(phase);
+        recordProcessingJob(id, phase, "running", view.percent);
+      }
     }
     const now = Date.now();
     const shouldRenderNow =
@@ -262,6 +301,9 @@ export function useProcessingPipeline() {
     liveProcessingPublishers.set(id, setLiveState);
     setLiveState(snapshot);
     liveProcessingLastPublishedAt.set(id, Date.now());
+    processingJobSnapshotRef.current.clear();
+    runningProcessingStagesRef.current.clear();
+    completedProcessingStagesRef.current.clear();
     transcriptAutoScrollRef.current = true;
     setLiveTab("transcript");
     minutesStreamRawRef.current = minutesStreamRawSnapshots.get(id) ?? "";

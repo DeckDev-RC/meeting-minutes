@@ -1,12 +1,17 @@
 [package]
 name = "meeting-minutes"
-version = "1.0.3"
+version = "1.0.4"
 edition = "2021"
 default-run = "meeting-minutes"
 
 [lib]
 name = "meeting_minutes_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "meeting-minutes"
+path = "src/main.rs"
+test = false
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

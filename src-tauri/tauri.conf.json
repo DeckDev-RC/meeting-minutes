@@ -1,6 +1,6 @@
 {
   "productName": "Meeting Minutes AI",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "identifier": "com.agregar.meeting-minutes",
   "build": {
     "frontendDist": "../dist",

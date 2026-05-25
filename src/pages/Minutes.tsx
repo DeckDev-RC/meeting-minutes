@@ -27,8 +27,11 @@ import type {
   MeetingChunkInsights,
   MeetingDecision,
   ProcessingChunkRecord,
+  StructuredAction,
   StructuredActionPatch,
+  StructuredDecision,
   StructuredDecisionPatch,
+  StructuredEvidence,
   StructuredMinutesData,
   TranscriptionSegment,
 } from "../lib/types";
@@ -281,6 +284,171 @@ function ActionItem({
   );
 }
 
+function ReviewMetricButton({
+  label,
+  value,
+  detail,
+  tone = "default",
+  ariaLabel,
+  onClick,
+}: {
+  label: string;
+  value: number | string;
+  detail: string;
+  tone?: "default" | "warning" | "good";
+  ariaLabel?: string;
+  onClick: () => void;
+}) {
+  const toneClass =
+    tone === "warning"
+      ? "border-amber-200 bg-amber-50 text-amber-900 hover:border-amber-300"
+      : tone === "good"
+        ? "border-emerald-200 bg-emerald-50 text-emerald-900 hover:border-emerald-300"
+        : "border-gray-200 bg-white text-gray-900 hover:border-blue-200 hover:bg-blue-50/40";
+
+  return (
+    <button
+      type="button"
+      aria-label={ariaLabel ?? `Abrir ${label}`}
+      onClick={onClick}
+      className={`rounded-lg border px-4 py-3 text-left shadow-sm transition ${toneClass}`}
+    >
+      <span className="block text-xs font-semibold uppercase tracking-wide text-gray-500">
+        {label}
+      </span>
+      <span className="mt-1 block text-2xl font-bold tabular-nums">{value}</span>
+      <span className="mt-1 block text-xs leading-5 text-gray-600">{detail}</span>
+    </button>
+  );
+}
+
+function CommandButton({
+  children,
+  onClick,
+}: {
+  children: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-800 shadow-sm transition hover:border-blue-200 hover:bg-blue-50"
+    >
+      {children}
+    </button>
+  );
+}
+
+function ReviewQueuePanel({
+  weakEvidences,
+  pendingActions,
+  topDecisions,
+  onSelectTab,
+}: {
+  weakEvidences: StructuredEvidence[];
+  pendingActions: StructuredAction[];
+  topDecisions: StructuredDecision[];
+  onSelectTab: (tab: MinutesTab) => void;
+}) {
+  return (
+    <aside className="space-y-4 lg:sticky lg:top-6 lg:self-start">
+      <section className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+        <div className="border-b border-gray-100 pb-3">
+          <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">
+            Revisao
+          </p>
+          <h3 className="mt-1 text-lg font-bold text-gray-950">Fila de revisao</h3>
+        </div>
+
+        <div className="mt-4 space-y-4">
+          <div>
+            <button
+              type="button"
+              onClick={() => onSelectTab("evidences")}
+              className="flex w-full items-center justify-between rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-left text-sm font-semibold text-amber-900 transition hover:border-amber-200"
+            >
+              <span>Evidencias fracas</span>
+              <span className="rounded-full bg-white px-2 py-0.5 text-xs tabular-nums">
+                {weakEvidences.length}
+              </span>
+            </button>
+            {weakEvidences.length > 0 ? (
+              <ul className="mt-2 space-y-2">
+                {weakEvidences.slice(0, 3).map((evidence) => (
+                  <li
+                    key={evidence.id}
+                    className="rounded-lg border border-amber-100 bg-white px-3 py-2 text-xs leading-5 text-gray-700"
+                  >
+                    <p className="font-semibold text-gray-900">
+                      Chunk {evidence.chunkIndex + 1} · {Math.round(evidence.validationScore * 100)}%
+                    </p>
+                    <p className="mt-1 line-clamp-3">{evidence.quote}</p>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="mt-2 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700">
+                Todas as evidencias estruturadas foram verificadas.
+              </p>
+            )}
+          </div>
+
+          <div>
+            <button
+              type="button"
+              onClick={() => onSelectTab("actions")}
+              className="flex w-full items-center justify-between rounded-lg border border-gray-100 bg-gray-50 px-3 py-2 text-left text-sm font-semibold text-gray-900 transition hover:border-blue-200"
+            >
+              <span>Acoes pendentes</span>
+              <span className="rounded-full bg-white px-2 py-0.5 text-xs tabular-nums">
+                {pendingActions.length}
+              </span>
+            </button>
+            <ul className="mt-2 space-y-2">
+              {pendingActions.slice(0, 4).map((action) => (
+                <li
+                  key={action.id}
+                  className="rounded-lg border border-gray-100 bg-white px-3 py-2 text-xs leading-5 text-gray-700"
+                >
+                  <p className="font-semibold text-gray-900">{action.task}</p>
+                  <p className="mt-1">
+                    {joinMeta(action.owner || "Sem responsavel", action.deadline || "Sem prazo")}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <div>
+            <button
+              type="button"
+              onClick={() => onSelectTab("decisions")}
+              className="flex w-full items-center justify-between rounded-lg border border-gray-100 bg-gray-50 px-3 py-2 text-left text-sm font-semibold text-gray-900 transition hover:border-blue-200"
+            >
+              <span>Decisoes principais</span>
+              <span className="rounded-full bg-white px-2 py-0.5 text-xs tabular-nums">
+                {topDecisions.length}
+              </span>
+            </button>
+            <ul className="mt-2 space-y-2">
+              {topDecisions.slice(0, 3).map((decision) => (
+                <li
+                  key={decision.id}
+                  className="rounded-lg border border-gray-100 bg-white px-3 py-2 text-xs leading-5 text-gray-700"
+                >
+                  <p className="font-semibold text-gray-900">{decision.title}</p>
+                  <p className="mt-1">{joinMeta(decision.owner || "", formatTime(decision.timestampSec))}</p>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      </section>
+    </aside>
+  );
+}
+
 export default function Minutes() {
   const { id } = useParams<{ id: string }>();
   const [html, setHtml] = useState<string | null>(null);
@@ -363,6 +531,21 @@ export default function Minutes() {
   );
   const structuredEvidencesById = useMemo(
     () => new Map((structuredMinutes?.evidences ?? []).map((evidence) => [evidence.id, evidence])),
+    [structuredMinutes],
+  );
+  const weakStructuredEvidences = useMemo(
+    () => (structuredMinutes?.evidences ?? []).filter((evidence) => !evidence.validated),
+    [structuredMinutes],
+  );
+  const pendingStructuredActions = useMemo(
+    () =>
+      (structuredMinutes?.actions ?? []).filter(
+        (action) => action.status !== "done" && action.status !== "canceled",
+      ),
+    [structuredMinutes],
+  );
+  const topStructuredDecisions = useMemo(
+    () => (structuredMinutes?.decisions ?? []).slice(0, 6),
     [structuredMinutes],
   );
   const hasLegacyOnlyMinutes = Boolean(html && !structuredMinutes);
@@ -479,15 +662,33 @@ export default function Minutes() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+    <div className="mx-auto max-w-6xl space-y-6">
+      <div className="flex flex-col gap-4 rounded-xl border border-gray-200 bg-white px-5 py-5 shadow-sm lg:flex-row lg:items-start lg:justify-between">
         <div>
+          <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">
+            Workspace de revisao
+          </p>
           <h2 className="text-2xl font-bold text-gray-950">Ata da reuniao</h2>
-          <p className="mt-2 text-sm leading-6 text-gray-600">
-            Revise o conteudo gerado e exporte em PDF quando estiver pronto.
+          <h3 className="mt-2 text-lg font-semibold text-gray-900">Central de revisao</h3>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-gray-600">
+            Revise a ata limpa, corrija decisoes e acoes, confira evidencias fracas e acompanhe
+            versoes sem perder o documento final.
           </p>
         </div>
-        {activeTab === "minutes" && <ExportButton title={title} />}
+        <div className="flex flex-wrap gap-2">
+          <CommandButton onClick={() => setActiveTab("evidences")}>
+            Revisar evidencias
+          </CommandButton>
+          <CommandButton onClick={() => setActiveTab("speakers")}>
+            Mapear falantes
+          </CommandButton>
+          {structuredMinutes && (
+            <CommandButton onClick={() => setActiveTab("participants")}>
+              Participantes
+            </CommandButton>
+          )}
+          {activeTab === "minutes" && <ExportButton title={title} />}
+        </div>
       </div>
 
       {structuredMinutes?.userEdited && (
@@ -508,7 +709,44 @@ export default function Minutes() {
         </div>
       )}
 
-      <div className="flex flex-wrap gap-2">
+      {structuredMinutes && (
+        <section
+          aria-label="Resumo da revisao"
+          className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"
+        >
+          <ReviewMetricButton
+            label="Decisoes"
+            value={structuredMinutes.decisions.length}
+            detail="Clique para editar responsaveis, tempo e evidencia."
+            ariaLabel="Abrir resumo de decisoes"
+            onClick={() => setActiveTab("decisions")}
+          />
+          <ReviewMetricButton
+            label="Acoes"
+            value={structuredMinutes.actions.length}
+            detail={`${pendingStructuredActions.length} ainda pendentes.`}
+            ariaLabel="Abrir resumo de acoes"
+            onClick={() => setActiveTab("actions")}
+          />
+          <ReviewMetricButton
+            label="Evidencias fracas"
+            value={weakStructuredEvidences.length}
+            detail="Itens que merecem conferencia humana."
+            tone={weakStructuredEvidences.length > 0 ? "warning" : "good"}
+            ariaLabel="Abrir evidencias fracas"
+            onClick={() => setActiveTab("evidences")}
+          />
+          <ReviewMetricButton
+            label="Versoes"
+            value={structuredMinutes.versions.length}
+            detail={structuredMinutes.userEdited ? "Edicoes salvas no historico." : "Versao inicial da ata."}
+            ariaLabel="Ver historico de versoes"
+            onClick={() => setActiveTab("minutes")}
+          />
+        </section>
+      )}
+
+      <div className="flex flex-wrap gap-2" aria-label="Modos de revisao">
         {tabs.map((tab) => {
           const selected = activeTab === tab.key;
           return (
@@ -539,7 +777,7 @@ export default function Minutes() {
       <div
         className={
           structuredMinutes
-            ? "grid gap-6 lg:grid-cols-[minmax(0,1fr)_19rem]"
+            ? "grid gap-6 lg:grid-cols-[minmax(0,1fr)_21rem]"
             : "space-y-6"
         }
       >
@@ -733,12 +971,18 @@ export default function Minutes() {
           )}
         </div>
         {structuredMinutes && (
-          <aside className="lg:sticky lg:top-6 lg:self-start">
+          <div className="space-y-4">
+            <ReviewQueuePanel
+              weakEvidences={weakStructuredEvidences}
+              pendingActions={pendingStructuredActions}
+              topDecisions={topStructuredDecisions}
+              onSelectTab={setActiveTab}
+            />
             <StructuredVersionsPanel
               versions={structuredMinutes.versions}
               onRestoreVersion={handleRestoreVersion}
             />
-          </aside>
+          </div>
         )}
       </div>
     </div>

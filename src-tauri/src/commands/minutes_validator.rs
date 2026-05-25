@@ -128,7 +128,13 @@ pub fn validate_evidence_against_segments_json(
 
     for segment in segments {
         let candidate = validate_evidence_against_text(evidence, &segment);
-        if candidate.score > best.score {
+        let same_score = (candidate.score - best.score).abs() < f64::EPSILON;
+        let candidate_is_better_excerpt = same_score
+            && !candidate.transcript_excerpt.is_empty()
+            && (best.transcript_excerpt.is_empty()
+                || candidate.transcript_excerpt.chars().count()
+                    < best.transcript_excerpt.chars().count());
+        if candidate.score > best.score || candidate_is_better_excerpt {
             best = candidate;
         }
     }
@@ -179,5 +185,34 @@ mod tests {
 
         assert!(!result.verified);
         assert_eq!(result.score, 0.0);
+    }
+
+    #[test]
+    fn segment_validation_prefers_matching_segment_excerpt() {
+        let segments_json = serde_json::json!([
+            {
+                "id": 0,
+                "start": 0,
+                "end": 4,
+                "text": "Abertura sem relacao com a decisao."
+            },
+            {
+                "id": 1,
+                "start": 5,
+                "end": 9,
+                "text": "Rafaela revisa as evidencias fracas ate sexta."
+            }
+        ])
+        .to_string();
+
+        let result = validate_evidence_against_segments_json(
+            "Rafaela revisa as evidencias fracas",
+            Some(&segments_json),
+        );
+
+        assert!(result.verified);
+        assert_eq!(result.score, 1.0);
+        assert!(result.transcript_excerpt.contains("Rafaela revisa"));
+        assert!(!result.transcript_excerpt.contains("Abertura sem relacao"));
     }
 }

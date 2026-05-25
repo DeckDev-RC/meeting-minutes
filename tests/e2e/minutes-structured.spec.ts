@@ -162,24 +162,29 @@ test("minutes page renders structured decisions actions and evidence tabs", asyn
   await expect(page.getByRole("heading", { name: "Ata da reuniao" })).toBeVisible({
     timeout: 45_000,
   });
+  await expect(page.getByRole("heading", { name: "Central de revisao" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Revisar evidencias" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Mapear falantes" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Fila de revisao" })).toBeVisible();
+  await expect(page.getByText("Evidencias fracas").first()).toBeVisible();
   await expect(page.getByText("Resumo final estruturado.")).toBeVisible();
   await expect(page.getByText("1 evidencia precisa de revisao")).toBeVisible();
 
   await page.getByRole("button", { name: /Decisoes\s*1/ }).click();
   await expect(page.getByRole("heading", { name: "Decisoes estruturadas" })).toBeVisible();
-  await expect(page.getByText("Aprovar entrega da ata estruturada")).toBeVisible();
+  await expect(page.getByText("Aprovar entrega da ata estruturada").first()).toBeVisible();
   await expect(page.getByText("Responsavel: Caio")).toBeVisible();
 
   await page.getByRole("button", { name: /Acoes\s*1/ }).click();
   await expect(page.getByRole("heading", { name: "Acoes estruturadas" })).toBeVisible();
-  await expect(page.getByText("Revisar evidencias fracas")).toBeVisible();
+  await expect(page.getByText("Revisar evidencias fracas").first()).toBeVisible();
   await expect(page.getByText("Prazo: sexta-feira")).toBeVisible();
 
   await page.getByRole("button", { name: /Evidencias\s*2/ }).click();
   await expect(page.getByRole("heading", { name: "Evidencias da ata" })).toBeVisible();
   await expect(page.getByText("Verificada - 96%")).toBeVisible();
   await expect(page.getByText("Fraca - 31%")).toBeVisible();
-  await expect(page.getByText("Rafaela revisa as evidencias fracas")).toBeVisible();
+  await expect(page.getByText("Rafaela revisa as evidencias fracas").first()).toBeVisible();
 });
 
 test("minutes page falls back to legacy html when structured data is absent", async ({ page }) => {

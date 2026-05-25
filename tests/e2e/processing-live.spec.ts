@@ -8,6 +8,7 @@ async function installTauriMock(page: Page) {
   await page.addInitScript((id) => {
     const delay = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
     const listeners = new Map<string, Set<(event: { payload: unknown }) => void>>();
+    const processingJobs: Array<Record<string, unknown>> = [];
     const chunks = [
       {
         index: 0,
@@ -248,10 +249,22 @@ async function installTauriMock(page: Page) {
           return undefined;
         }
         if (command === "update_meeting_status") return undefined;
+        if (command === "upsert_processing_job") {
+          processingJobs.push({
+            stage: args.stage,
+            status: args.status,
+            progressPct: args.progressPct,
+          });
+          (window as typeof window & { __PROCESSING_JOB_UPSERTS__?: typeof processingJobs })
+            .__PROCESSING_JOB_UPSERTS__ = processingJobs;
+          return undefined;
+        }
 
         throw new Error(`Unhandled mock command: ${command}`);
       },
     };
+    (window as typeof window & { __PROCESSING_JOB_UPSERTS__?: typeof processingJobs })
+      .__PROCESSING_JOB_UPSERTS__ = processingJobs;
   }, meetingId);
 }
 
@@ -385,6 +398,37 @@ test("processing live panel renders readable transcript, insights, streamed minu
     path: testInfo.outputPath("processing-live-desktop.png"),
     fullPage: false,
   });
+
+  await expect
+    .poll(
+      async () =>
+        page.evaluate(() => {
+          const jobs =
+            (window as typeof window & {
+              __PROCESSING_JOB_UPSERTS__?: Array<Record<string, unknown>>;
+            }).__PROCESSING_JOB_UPSERTS__ ?? [];
+          const latestByStage = new Map<string, Record<string, unknown>>();
+          for (const job of jobs) latestByStage.set(String(job.stage), job);
+          return Array.from(latestByStage.entries()).map(([stage, job]) => ({
+            stage,
+            status: job.status,
+            progressPct: job.progressPct,
+          }));
+        }),
+      { timeout: 20_000 },
+    )
+    .toEqual(
+      expect.arrayContaining([
+        { stage: "prepare_audio", status: "done", progressPct: 100 },
+        { stage: "detect_speech", status: "done", progressPct: 100 },
+        { stage: "create_chunks", status: "done", progressPct: 100 },
+        { stage: "transcribe", status: "done", progressPct: 100 },
+        { stage: "diarize", status: "done", progressPct: 100 },
+        { stage: "extract_facts", status: "done", progressPct: 100 },
+        { stage: "generate", status: "done", progressPct: 100 },
+        { stage: "complete", status: "done", progressPct: 100 },
+      ]),
+    );
 });
 
 test("processing live panel remains usable on mobile viewport", async ({ page }, testInfo) => {
