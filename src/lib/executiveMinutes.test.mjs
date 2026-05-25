@@ -37,7 +37,7 @@ const compile = spawnSync(
 
 assert.equal(compile.status, 0, compile.stdout + compile.stderr);
 
-const { buildExecutiveMinutesHtml, selectExecutiveActions } = require(
+const { buildExecutiveMinutesHtml, calculateExecutivePreservation, selectExecutiveActions } = require(
   join(outDir, "executiveMinutes.js"),
 );
 
@@ -101,7 +101,47 @@ const baseStructuredMinutes = {
       createdAt: "2026-05-25T10:00:00Z",
     },
   ],
-  evidences: [],
+  evidences: [
+    {
+      id: "ev-1",
+      minuteId: "minute-1",
+      meetingId: "meeting-1",
+      parentType: "decision",
+      parentId: "decision-1",
+      chunkIndex: 0,
+      quote: "vamos alinhar o que e padrao fixo",
+      transcriptExcerpt: "vamos alinhar o que e padrao fixo",
+      validated: true,
+      validationScore: 0.92,
+      createdAt: "2026-05-25T10:00:00Z",
+    },
+    {
+      id: "ev-2",
+      minuteId: "minute-1",
+      meetingId: "meeting-1",
+      parentType: "action",
+      parentId: "action-ui",
+      chunkIndex: 0,
+      quote: "clica clica, Marcelo, arrasta para o lado",
+      transcriptExcerpt: "clica clica, Marcelo, arrasta para o lado",
+      validated: true,
+      validationScore: 0.9,
+      createdAt: "2026-05-25T10:00:00Z",
+    },
+    {
+      id: "ev-3",
+      minuteId: "minute-1",
+      meetingId: "meeting-1",
+      parentType: "action",
+      parentId: "action-business",
+      chunkIndex: 0,
+      quote: "ajustar com a Naiara para tras, janeiro ate abril",
+      transcriptExcerpt: "ajustar com a Naiara para tras, janeiro ate abril",
+      validated: true,
+      validationScore: 0.88,
+      createdAt: "2026-05-25T10:00:00Z",
+    },
+  ],
   versions: [],
 };
 
@@ -118,3 +158,51 @@ assert.match(executiveHtml, /Ata Executiva/);
 assert.match(executiveHtml, /Ajustar a contabilidade de janeiro a abril/);
 assert.doesNotMatch(executiveHtml, /Clicar e arrastar/);
 assert.doesNotMatch(executiveHtml, /Rastreabilidade/);
+
+const weakEvidenceStructured = {
+  ...baseStructuredMinutes,
+  actions: [
+    ...baseStructuredMinutes.actions,
+    {
+      ...baseStructuredMinutes.actions[1],
+      id: "action-weak",
+      itemIndex: 2,
+      task: "Definir novo fluxo financeiro",
+      evidenceId: "ev-weak",
+      evidence: "frase que nao aparece na transcricao",
+    },
+  ],
+  evidences: [
+    ...baseStructuredMinutes.evidences,
+    {
+      id: "ev-weak",
+      minuteId: "minute-1",
+      meetingId: "meeting-1",
+      parentType: "action",
+      parentId: "action-weak",
+      chunkIndex: 0,
+      quote: "frase que nao aparece na transcricao",
+      transcriptExcerpt: null,
+      validated: false,
+      validationScore: 0.21,
+      createdAt: "2026-05-25T10:00:00Z",
+    },
+  ],
+};
+
+const weakEvidenceHtml = buildExecutiveMinutesHtml(weakEvidenceStructured, {
+  title: "Ata Executiva",
+});
+
+assert.doesNotMatch(weakEvidenceHtml, /Definir novo fluxo financeiro/);
+assert.match(weakEvidenceHtml, /quarentena por evidencia fraca/i);
+
+const preservation = calculateExecutivePreservation(weakEvidenceStructured, {
+  actionLimit: 8,
+  decisionLimit: 6,
+});
+
+assert.equal(preservation.sourceTotal, 4);
+assert.equal(preservation.exportedTotal, 2);
+assert.equal(preservation.weakEvidenceTotal, 1);
+assert.equal(preservation.level, "warning");

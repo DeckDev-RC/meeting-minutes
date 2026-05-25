@@ -16,7 +16,7 @@ pub use processing_chunks::{
     get_processing_chunks, save_processing_chunks, update_processing_chunk_facts,
     update_processing_chunk_result,
 };
-pub use processing_jobs::{get_processing_jobs, upsert_processing_job};
+pub use processing_jobs::{get_processing_jobs, reap_stale_processing_jobs, upsert_processing_job};
 pub use structured_minutes::edit::{
     restore_minute_version, save_minute_revision, update_minute_action, update_minute_decision,
     update_minute_participants,

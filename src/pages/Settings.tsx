@@ -2,11 +2,14 @@ import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   checkLocalTranscriptionBackends,
+  exportDiagnostics,
   getApiKeys,
   getOfflineTranscriptionRuntimeStatus,
   installOfflineTranscriptionRuntime,
   removeOfflineTranscriptionRuntime,
   setApiKeys,
+  validateApiKeys,
+  type ApiValidationResult,
   type OfflineTranscriptionRuntimeStatus,
 } from "../lib/tauri";
 import {
@@ -61,6 +64,11 @@ export default function Settings() {
       getCloudflareQuotaState(typeof window === "undefined" ? undefined : window.localStorage),
     );
   const [saved, setSaved] = useState(false);
+  const [validationBusy, setValidationBusy] = useState(false);
+  const [validationResults, setValidationResults] = useState<ApiValidationResult[]>([]);
+  const [validationError, setValidationError] = useState("");
+  const [diagnosticsMessage, setDiagnosticsMessage] = useState("");
+  const [diagnosticsError, setDiagnosticsError] = useState("");
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -176,10 +184,35 @@ export default function Settings() {
   const cloudflareConfigured = Boolean(cloudflareAccountId.trim() && cloudflareApiToken.trim());
   const deepgramConfigured = Boolean(deepgramApiKey.trim());
   const groqConfigured = Boolean(groq.trim());
+  const geminiConfigured = Boolean(gemini.trim());
   const localConfigured = Boolean(
     localStatus?.fasterWhisperAvailable || localStatus?.parakeetAvailable,
   );
   const offlineRuntimeReady = Boolean(offlineRuntimeStatus?.fasterWhisperAvailable);
+  const validationByProvider = new Map(validationResults.map((item) => [item.provider, item]));
+  const validationTone = (provider: ApiValidationResult["provider"], configured: boolean) => {
+    const result = validationByProvider.get(provider);
+    if (!result) return configured ? "good" : "muted";
+    if (result.status === "valid") return "good";
+    if (result.status === "missing") return "muted";
+    return "warn";
+  };
+  const validationStatus = (
+    provider: ApiValidationResult["provider"],
+    fallback: string,
+  ) => {
+    const result = validationByProvider.get(provider);
+    if (!result) return fallback;
+    const prefix =
+      result.status === "valid"
+        ? "Validado"
+        : result.status === "invalid"
+          ? "Invalido"
+          : result.status === "missing"
+            ? "Nao configurado"
+            : "Indisponivel";
+    return `${prefix}: ${result.message}`;
+  };
 
   const handleSave = async () => {
     const speakerCount = expectedSpeakers ? Number(expectedSpeakers) : undefined;
@@ -196,6 +229,41 @@ export default function Settings() {
     );
     setSaved(true);
     setTimeout(() => setSaved(false), 3000);
+  };
+
+  const handleValidateKeys = async () => {
+    setValidationBusy(true);
+    setValidationError("");
+    try {
+      const results = await validateApiKeys({
+        groq,
+        gemini,
+        cloudflareAccountId,
+        cloudflareApiToken,
+        deepgramApiKey,
+      });
+      setValidationResults(results);
+    } catch (error) {
+      setValidationError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setValidationBusy(false);
+    }
+  };
+
+  const handleSaveAndValidate = async () => {
+    await handleSave();
+    await handleValidateKeys();
+  };
+
+  const handleExportDiagnostics = async () => {
+    setDiagnosticsMessage("");
+    setDiagnosticsError("");
+    try {
+      const path = await exportDiagnostics(null);
+      setDiagnosticsMessage(`Diagnostico exportado: ${path}`);
+    } catch (error) {
+      setDiagnosticsError(error instanceof Error ? error.message : String(error));
+    }
   };
 
   if (loading) {
@@ -252,24 +320,32 @@ export default function Settings() {
                 status: cloudflareConfigured
                   ? cloudflareQuotaState.isExhaustedToday
                     ? "Cota provavelmente esgotada hoje"
-                    : "Configurado"
+                    : validationStatus("cloudflare", "Configurado")
                   : "Nao configurado",
-                tone:
-                  cloudflareConfigured && !cloudflareQuotaState.isExhaustedToday
-                    ? "good"
-                    : cloudflareConfigured
-                      ? "warn"
-                      : "muted",
+                tone: cloudflareQuotaState.isExhaustedToday
+                  ? "warn"
+                  : validationTone("cloudflare", cloudflareConfigured),
               },
               {
                 name: "Deepgram",
-                status: deepgramConfigured ? "Configurado para fallback/premium" : "Nao configurado",
-                tone: deepgramConfigured ? "good" : "muted",
+                status: deepgramConfigured
+                  ? validationStatus("deepgram", "Configurado para fallback/premium")
+                  : "Nao configurado",
+                tone: validationTone("deepgram", deepgramConfigured),
               },
               {
                 name: "Groq",
-                status: groqConfigured ? "Configurado como opcional" : "Nao configurado",
-                tone: groqConfigured ? "good" : "muted",
+                status: groqConfigured
+                  ? validationStatus("groq", "Configurado como opcional")
+                  : "Nao configurado",
+                tone: validationTone("groq", groqConfigured),
+              },
+              {
+                name: "Gemini",
+                status: geminiConfigured
+                  ? validationStatus("gemini", "Configurado para gerar ata")
+                  : "Nao configurado",
+                tone: validationTone("gemini", geminiConfigured),
               },
               {
                 name: "Local",
@@ -304,6 +380,33 @@ export default function Settings() {
               </div>
             ))}
           </div>
+        </section>
+
+        <section className="mb-5 rounded-lg border border-gray-200 bg-white px-4 py-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <p className="text-sm font-semibold text-gray-950">Suporte e diagnostico</p>
+              <p className="mt-1 text-xs leading-5 text-gray-500">
+                Exporte um pacote com metadados e arquivos textuais mascarados. Chaves e tokens sao
+                removidos antes de salvar o ZIP.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleExportDiagnostics}
+              className="rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-semibold text-gray-800 shadow-sm transition-colors hover:bg-gray-50"
+            >
+              Exportar diagnostico
+            </button>
+          </div>
+          {diagnosticsMessage && (
+            <p className="mt-3 break-all text-sm font-medium text-blue-700">{diagnosticsMessage}</p>
+          )}
+          {diagnosticsError && (
+            <p className="mt-3 rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-sm font-medium text-red-700">
+              {diagnosticsError}
+            </p>
+          )}
         </section>
 
         <section className="mb-5 rounded-lg border border-gray-200 bg-white px-4 py-4">
@@ -550,8 +653,18 @@ export default function Settings() {
             >
               Salvar configuracoes
             </button>
+            <button
+              onClick={handleSaveAndValidate}
+              disabled={validationBusy}
+              className="rounded-lg border border-blue-200 bg-blue-50 px-5 py-2.5 text-sm font-semibold text-blue-700 shadow-sm transition-colors hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {validationBusy ? "Testando..." : "Salvar e testar chaves"}
+            </button>
             {saved && (
               <p className="text-sm font-medium text-green-700">Chaves salvas com sucesso.</p>
+            )}
+            {validationError && (
+              <p className="text-sm font-medium text-red-700">{validationError}</p>
             )}
           </div>
         </div>

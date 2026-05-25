@@ -1,6 +1,8 @@
-import { Link, useLocation } from "react-router-dom";
-import type { ReactNode } from "react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
+import { useMemo, type ReactNode } from "react";
 import { useMeetingStore } from "../store/meetingStore";
+import ThemeToggle from "./ThemeToggle";
+import { useGlobalShortcuts } from "../lib/shortcuts";
 
 const navItems = [
   { path: "/upload", label: "Nova Reuniao", hint: "Enviar arquivo" },
@@ -10,10 +12,20 @@ const navItems = [
 
 export default function Layout({ children }: { children: ReactNode }) {
   const location = useLocation();
+  const navigate = useNavigate();
   const { currentMeetingId, progress, stepStatus, error } = useMeetingStore();
   const hasRunningStep = Object.values(stepStatus).some((status) => status === "running");
   const showProcessingLink =
     !!currentMeetingId && (hasRunningStep || !!error || (progress > 0 && progress < 100));
+  const shortcuts = useMemo(
+    () => [
+      { key: "u", mod: true, handler: () => navigate("/upload") },
+      { key: "h", mod: true, handler: () => navigate("/history") },
+      { key: ",", mod: true, handler: () => navigate("/settings") },
+    ],
+    [navigate],
+  );
+  useGlobalShortcuts(shortcuts);
 
   return (
     <div className="flex h-screen flex-col bg-[#f5f7fb] md:flex-row">
@@ -23,10 +35,11 @@ export default function Layout({ children }: { children: ReactNode }) {
             <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-600 text-sm font-bold text-white shadow-sm">
               MM
             </div>
-            <div>
+            <div className="min-w-0 flex-1">
               <h1 className="text-base font-bold text-gray-950">Meeting Minutes AI</h1>
               <p className="text-xs text-gray-500">Transcricao e ata</p>
             </div>
+            <ThemeToggle />
           </div>
         </div>
         <nav className="grid grid-cols-2 gap-2 p-3 sm:grid-cols-4 md:block md:flex-1">

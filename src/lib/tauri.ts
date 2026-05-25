@@ -437,6 +437,9 @@ export const savePdf = (pdfBytes: number[], suggestedName: string) =>
 export const saveHtml = (htmlContent: string, suggestedName: string) =>
   invoke<string>('save_html', { htmlContent, suggestedName });
 
+export const exportDiagnostics = (meetingId?: string | null) =>
+  invoke<string>('export_diagnostics', { meetingId });
+
 export const saveBenchmarkRun = (path: string, content: string) =>
   invoke<string>('save_benchmark_run', { path, content });
 
@@ -445,6 +448,24 @@ export const resolveProcessingWorkDir = (meetingId: string) =>
 
 export const openFolder = (path: string) =>
   invoke<void>('open_folder', { path });
+
+export const reapStaleProcessingJobs = (staleAfterMinutes = 90) =>
+  invoke<number>('reap_stale_processing_jobs', { staleAfterMinutes });
+
+export interface ApiValidationResult {
+  provider: 'groq' | 'gemini' | 'cloudflare' | 'deepgram';
+  status: 'valid' | 'missing' | 'invalid' | 'error';
+  message: string;
+}
+
+export const validateApiKeys = (input: {
+  groq: string;
+  gemini: string;
+  cloudflareAccountId: string;
+  cloudflareApiToken: string;
+  deepgramApiKey: string;
+}) =>
+  invoke<ApiValidationResult[]>('validate_api_keys', { input });
 
 export const getApiKeys = () =>
   invoke<{

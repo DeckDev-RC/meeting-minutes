@@ -1,3 +1,4 @@
+pub mod api_validation;
 pub mod audio;
 pub mod audio_chunker;
 pub mod db;

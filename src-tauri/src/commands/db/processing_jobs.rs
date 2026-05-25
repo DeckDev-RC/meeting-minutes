@@ -114,3 +114,118 @@ pub fn get_processing_jobs(
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())
 }
+
+pub(super) fn reap_stale_processing_jobs_record(
+    db: &Connection,
+    stale_after_minutes: i64,
+    now_rfc3339: &str,
+) -> Result<usize, String> {
+    let stale_after_minutes = stale_after_minutes.max(5);
+    let now = chrono::DateTime::parse_from_rfc3339(now_rfc3339)
+        .map_err(|e| format!("invalid reaper timestamp: {e}"))?
+        .with_timezone(&chrono::Utc);
+    let cutoff = now - chrono::Duration::minutes(stale_after_minutes);
+    let cutoff = cutoff.to_rfc3339();
+    let now = now.to_rfc3339();
+
+    let mut stmt = db
+        .prepare(
+            "SELECT DISTINCT meeting_id
+             FROM processing_jobs
+             WHERE status IN ('pending', 'running') AND updated_at < ?1",
+        )
+        .map_err(|e| e.to_string())?;
+    let affected_meetings = stmt
+        .query_map(params![&cutoff], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    drop(stmt);
+
+    let reaped = db
+        .execute(
+            "UPDATE processing_jobs
+             SET status = 'error',
+                 progress_pct = CASE WHEN progress_pct >= 100 THEN 99 ELSE progress_pct END,
+                 error_msg = COALESCE(error_msg, 'Processamento interrompido; use Retomar para continuar.'),
+                 finished_at = ?1,
+                 updated_at = ?1
+             WHERE status IN ('pending', 'running') AND updated_at < ?2",
+            params![&now, &cutoff],
+        )
+        .map_err(|e| e.to_string())?;
+
+    for meeting_id in affected_meetings {
+        db.execute(
+            "UPDATE meetings
+             SET status = 'error', updated_at = ?1
+             WHERE id = ?2 AND status = 'processing'",
+            params![&now, meeting_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    Ok(reaped)
+}
+
+#[command]
+pub fn reap_stale_processing_jobs(
+    state: tauri::State<'_, DbState>,
+    stale_after_minutes: Option<i64>,
+) -> Result<usize, String> {
+    let db = state.0.lock().map_err(|e| e.to_string())?;
+    reap_stale_processing_jobs_record(
+        &db,
+        stale_after_minutes.unwrap_or(90),
+        &chrono::Utc::now().to_rfc3339(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::db::init_db;
+    use rusqlite::params;
+
+    #[test]
+    fn reaper_marks_stale_running_jobs_and_meetings_as_error() {
+        let dir =
+            std::env::temp_dir().join(format!("meeting-minutes-reaper-{}", uuid::Uuid::new_v4()));
+        let conn = init_db(&dir);
+        conn.execute(
+            "INSERT INTO meetings (id, title, file_path, status, created_at, updated_at)
+             VALUES ('meeting-1', 'Teste', 'a.mp4', 'processing', '2026-05-25T10:00:00Z', '2026-05-25T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO processing_jobs
+                (id, meeting_id, stage, status, progress_pct, error_msg, started_at, finished_at, created_at, updated_at)
+             VALUES ('job-1', 'meeting-1', 'transcribe', 'running', 45, NULL, NULL, NULL, '2026-05-25T10:00:00Z', ?1)",
+            params!["2026-05-25T10:00:00Z"],
+        )
+        .unwrap();
+
+        let reaped = reap_stale_processing_jobs_record(&conn, 60, "2026-05-25T12:30:00Z").unwrap();
+
+        assert_eq!(reaped, 1);
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM processing_jobs WHERE id = 'job-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "error");
+        let meeting_status: String = conn
+            .query_row(
+                "SELECT status FROM meetings WHERE id = 'meeting-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(meeting_status, "error");
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+}

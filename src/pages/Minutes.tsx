@@ -42,7 +42,7 @@ import {
   parseSpeakerMapJson,
   type SpeakerMap,
 } from "../lib/speakerMap";
-import { buildExecutiveMinutesHtml } from "../lib/executiveMinutes";
+import { buildExecutiveMinutesHtml, calculateExecutivePreservation } from "../lib/executiveMinutes";
 import {
   StructuredActionsPanel,
   StructuredDecisionsPanel,
@@ -548,6 +548,15 @@ export default function Minutes() {
     () => (structuredMinutes?.evidences ?? []).filter((evidence) => !evidence.validated),
     [structuredMinutes],
   );
+  const executivePreservation = useMemo(
+    () =>
+      structuredMinutes
+        ? calculateExecutivePreservation(structuredMinutes, {
+            title: "Ata Executiva",
+          })
+        : null,
+    [structuredMinutes],
+  );
   const pendingStructuredActions = useMemo(
     () =>
       (structuredMinutes?.actions ?? []).filter(
@@ -723,7 +732,7 @@ export default function Minutes() {
       {structuredMinutes && (
         <section
           aria-label="Resumo da revisao"
-          className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"
+          className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5"
         >
           <ReviewMetricButton
             label="Decisoes"
@@ -745,6 +754,18 @@ export default function Minutes() {
             detail="Itens que merecem conferencia humana."
             tone={weakStructuredEvidences.length > 0 ? "warning" : "good"}
             ariaLabel="Abrir evidencias fracas"
+            onClick={() => setActiveTab("evidences")}
+          />
+          <ReviewMetricButton
+            label="Preservacao"
+            value={`${executivePreservation?.exportedTotal ?? 0}/${executivePreservation?.sourceTotal ?? 0}`}
+            detail={
+              executivePreservation?.weakEvidenceTotal
+                ? `${executivePreservation.weakEvidenceTotal} em quarentena.`
+                : "Exportacao executiva auditavel."
+            }
+            tone={executivePreservation?.level === "ok" ? "good" : "warning"}
+            ariaLabel="Abrir evidencias para revisar preservacao"
             onClick={() => setActiveTab("evidences")}
           />
           <ReviewMetricButton

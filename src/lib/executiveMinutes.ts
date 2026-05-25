@@ -1,9 +1,33 @@
-import type { StructuredAction, StructuredDecision, StructuredMinutesData } from "./types";
+import type {
+  StructuredAction,
+  StructuredDecision,
+  StructuredEvidence,
+  StructuredMinutesData,
+} from "./types";
 
 export type ExecutiveMinutesOptions = {
   title?: string;
   actionLimit?: number;
   decisionLimit?: number;
+};
+
+export type ExecutivePreservationLevel = "ok" | "warning" | "risk";
+
+export type ExecutivePreservationMetric = {
+  sourceDecisionCount: number;
+  sourceActionCount: number;
+  sourceTotal: number;
+  auditableDecisionCount: number;
+  auditableActionCount: number;
+  auditableTotal: number;
+  exportedDecisionCount: number;
+  exportedActionCount: number;
+  exportedTotal: number;
+  weakEvidenceTotal: number;
+  omittedLowPriorityTotal: number;
+  auditableRatio: number;
+  exportRatio: number;
+  level: ExecutivePreservationLevel;
 };
 
 const DEFAULT_ACTION_LIMIT = 10;
@@ -106,12 +130,12 @@ function scoreExecutiveAction(action: StructuredAction) {
 
 export function selectExecutiveActions(
   actions: StructuredAction[],
-  options: { limit?: number } = {},
+  options: { limit?: number; evidences?: StructuredEvidence[] } = {},
 ) {
   const limit = Math.max(1, options.limit ?? DEFAULT_ACTION_LIMIT);
   const seen = new Set<string>();
 
-  return actions
+  return trustedActions(actions, options.evidences)
     .filter((action) => action.task.trim())
     .filter((action) => !isLikelyUiNoiseAction(action))
     .map((action) => ({ action, score: scoreExecutiveAction(action) }))
@@ -129,9 +153,13 @@ export function selectExecutiveActions(
     .map(({ action }) => action);
 }
 
-function selectExecutiveDecisions(decisions: StructuredDecision[], limit: number) {
+function selectExecutiveDecisions(
+  decisions: StructuredDecision[],
+  limit: number,
+  evidences?: StructuredEvidence[],
+) {
   const seen = new Set<string>();
-  return decisions
+  return trustedDecisions(decisions, evidences)
     .filter((decision) => decision.title.trim())
     .filter((decision) => {
       const key = foldLatinLower(decision.title);
@@ -156,6 +184,94 @@ function displayValue(value: string | null | undefined, fallback: string) {
   return trimmed ? trimmed : fallback;
 }
 
+function evidenceById(evidences: StructuredEvidence[] | undefined) {
+  return new Map((evidences ?? []).map((evidence) => [evidence.id, evidence]));
+}
+
+function hasEvidenceRecords(evidences: StructuredEvidence[] | undefined) {
+  return Boolean(evidences && evidences.length > 0);
+}
+
+function hasTrustedEvidence(
+  evidenceId: string | null | undefined,
+  evidenceRecords: Map<string, StructuredEvidence> | null,
+) {
+  if (!evidenceRecords) return true;
+  if (!evidenceId) return false;
+  const evidence = evidenceRecords.get(evidenceId);
+  return Boolean(evidence?.validated);
+}
+
+function trustedDecisions(
+  decisions: StructuredDecision[],
+  evidences: StructuredEvidence[] | undefined,
+) {
+  const records = hasEvidenceRecords(evidences) ? evidenceById(evidences) : null;
+  return decisions.filter((decision) => hasTrustedEvidence(decision.evidenceId, records));
+}
+
+function trustedActions(
+  actions: StructuredAction[],
+  evidences: StructuredEvidence[] | undefined,
+) {
+  const records = hasEvidenceRecords(evidences) ? evidenceById(evidences) : null;
+  return actions.filter((action) => hasTrustedEvidence(action.evidenceId, records));
+}
+
+export function calculateExecutivePreservation(
+  structured: StructuredMinutesData,
+  options: ExecutiveMinutesOptions = {},
+): ExecutivePreservationMetric {
+  const decisionLimit = Math.max(1, options.decisionLimit ?? DEFAULT_DECISION_LIMIT);
+  const actionLimit = Math.max(1, options.actionLimit ?? DEFAULT_ACTION_LIMIT);
+  const decisions = structured.decisions ?? [];
+  const actions = structured.actions ?? [];
+  const auditableDecisions = trustedDecisions(decisions, structured.evidences);
+  const auditableActions = trustedActions(actions, structured.evidences);
+  const exportedDecisions = selectExecutiveDecisions(
+    decisions,
+    decisionLimit,
+    structured.evidences,
+  );
+  const exportedActions = selectExecutiveActions(actions, {
+    limit: actionLimit,
+    evidences: structured.evidences,
+  });
+
+  const sourceDecisionCount = decisions.length;
+  const sourceActionCount = actions.length;
+  const sourceTotal = sourceDecisionCount + sourceActionCount;
+  const auditableDecisionCount = auditableDecisions.length;
+  const auditableActionCount = auditableActions.length;
+  const auditableTotal = auditableDecisionCount + auditableActionCount;
+  const exportedDecisionCount = exportedDecisions.length;
+  const exportedActionCount = exportedActions.length;
+  const exportedTotal = exportedDecisionCount + exportedActionCount;
+  const weakEvidenceTotal = Math.max(0, sourceTotal - auditableTotal);
+  const omittedLowPriorityTotal = Math.max(0, auditableTotal - exportedTotal);
+  const auditableRatio = sourceTotal === 0 ? 1 : auditableTotal / sourceTotal;
+  const exportRatio = auditableTotal === 0 ? 1 : exportedTotal / auditableTotal;
+  const level: ExecutivePreservationLevel =
+    sourceTotal > 0 && auditableRatio < 0.5 ? "risk" : weakEvidenceTotal > 0 ? "warning" : "ok";
+
+  return {
+    sourceDecisionCount,
+    sourceActionCount,
+    sourceTotal,
+    auditableDecisionCount,
+    auditableActionCount,
+    auditableTotal,
+    exportedDecisionCount,
+    exportedActionCount,
+    exportedTotal,
+    weakEvidenceTotal,
+    omittedLowPriorityTotal,
+    auditableRatio,
+    exportRatio,
+    level,
+  };
+}
+
 export function buildExecutiveMinutesHtml(
   structured: StructuredMinutesData,
   options: ExecutiveMinutesOptions = {},
@@ -167,11 +283,13 @@ export function buildExecutiveMinutesHtml(
   const decisions = selectExecutiveDecisions(
     allDecisions,
     Math.max(1, options.decisionLimit ?? DEFAULT_DECISION_LIMIT),
+    structured.evidences,
   );
   const actions = selectExecutiveActions(allActions, {
     limit: options.actionLimit ?? DEFAULT_ACTION_LIMIT,
+    evidences: structured.evidences,
   });
-  const omittedActions = Math.max(0, allActions.length - actions.length);
+  const preservation = calculateExecutivePreservation(structured, options);
 
   const participants =
     participantNames.length > 0
@@ -191,9 +309,13 @@ export function buildExecutiveMinutesHtml(
 
   html += `<div class="section"><h2>Resumo Executivo</h2><div class="summary-box">`;
   html += `<p>Esta versao prioriza os pontos acionaveis da reuniao: ${decisions.length} decisao(oes) e ${actions.length} acao(oes) relevantes.</p>`;
-  if (omittedActions > 0) {
-    html += `<p>${omittedActions} item(ns) operacionais, duplicados ou de baixa relevancia ficaram fora desta versao executiva. Use a ata completa para auditoria.</p>`;
+  if (preservation.weakEvidenceTotal > 0) {
+    html += `<p>${preservation.weakEvidenceTotal} item(ns) ficaram em quarentena por evidencia fraca e nao entram nesta exportacao executiva.</p>`;
   }
+  if (preservation.omittedLowPriorityTotal > 0) {
+    html += `<p>${preservation.omittedLowPriorityTotal} item(ns) auditaveis foram omitidos por duplicidade, baixa relevancia ou limite executivo. Use a ata completa para auditoria.</p>`;
+  }
+  html += `<p>Preservacao executiva: ${preservation.exportedTotal}/${preservation.sourceTotal} fato(s) estruturados no documento enxuto.</p>`;
   html += `</div></div>`;
 
   html += `<div class="section"><h2>Participantes</h2><div class="participants-list">`;

@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMeetingStore } from "../store/meetingStore";
-import { getMeetings } from "../lib/tauri";
+import { getMeetings, reapStaleProcessingJobs } from "../lib/tauri";
 import { invoke } from "@tauri-apps/api/core";
 
 const statusLabel = {
@@ -20,6 +20,7 @@ export default function History() {
   }, []);
 
   const loadMeetings = async () => {
+    await reapStaleProcessingJobs(90).catch(() => 0);
     const data = await getMeetings();
     setMeetings(data);
   };

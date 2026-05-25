@@ -251,6 +251,7 @@ pub fn run() {
             commands::db::processing_chunks::get_processing_chunks,
             commands::db::processing_jobs::upsert_processing_job,
             commands::db::processing_jobs::get_processing_jobs,
+            commands::db::processing_jobs::reap_stale_processing_jobs,
             commands::db::processing_chunks::update_processing_chunk_result,
             commands::db::processing_chunks::update_processing_chunk_facts,
             commands::db::transcriptions::save_transcription,
@@ -269,6 +270,7 @@ pub fn run() {
             commands::storage::resolve_processing_work_dir,
             commands::storage::save_pdf,
             commands::storage::save_html,
+            commands::storage::export_diagnostics,
             commands::storage::save_benchmark_run,
             commands::storage::open_folder,
             commands::keyring::get_api_secret,
@@ -277,6 +279,7 @@ pub fn run() {
             commands::offline_runtime::get_offline_transcription_runtime_status,
             commands::offline_runtime::install_offline_transcription_runtime,
             commands::offline_runtime::remove_offline_transcription_runtime,
+            commands::api_validation::validate_api_keys,
             get_api_keys,
             set_api_keys,
         ])
