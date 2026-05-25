@@ -26,6 +26,8 @@ export interface TranscriptionPreflightInput {
   cloudflareAccountId?: string | null;
   cloudflareApiToken?: string | null;
   deepgramApiKey?: string | null;
+  localBackendAvailable?: boolean;
+  parakeetBackendAvailable?: boolean;
   manualProvider?: TranscriptionBackend | null;
   cloudflareQuotaExhaustedToday?: boolean;
 }
@@ -111,6 +113,8 @@ export function buildTranscriptionPreflight({
   cloudflareAccountId,
   cloudflareApiToken,
   deepgramApiKey,
+  localBackendAvailable,
+  parakeetBackendAvailable,
   manualProvider,
   cloudflareQuotaExhaustedToday = false,
 }: TranscriptionPreflightInput): TranscriptionPreflight {
@@ -124,6 +128,8 @@ export function buildTranscriptionPreflight({
     cloudflareAccountId,
     cloudflareApiToken,
     deepgramApiKey,
+    localBackendAvailable,
+    parakeetBackendAvailable,
     profile: transcriptionProfile,
     manualProvider,
     unavailableBackends,
@@ -137,6 +143,8 @@ export function buildTranscriptionPreflight({
           cloudflareAccountId,
           cloudflareApiToken,
           deepgramApiKey,
+          localBackendAvailable,
+          parakeetBackendAvailable,
           profile: transcriptionProfile,
           manualProvider,
           primaryBackend: backend,

@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import DropZone from "../components/DropZone";
-import { getApiKeys, probeMediaMetadata, saveMeeting } from "../lib/tauri";
+import {
+  checkLocalTranscriptionBackends,
+  getApiKeys,
+  probeMediaMetadata,
+  saveMeeting,
+} from "../lib/tauri";
 import {
   getCloudflareQuotaState,
   type CloudflareQuotaState,
@@ -92,6 +97,10 @@ export default function Upload() {
   const [preflightLoading, setPreflightLoading] = useState(false);
   const [preflightError, setPreflightError] = useState("");
   const [apiKeys, setApiKeysState] = useState<Awaited<ReturnType<typeof getApiKeys>> | null>(null);
+  const [localTranscriptionStatus, setLocalTranscriptionStatus] = useState<{
+    fasterWhisperAvailable: boolean;
+    parakeetAvailable: boolean;
+  } | null>(null);
   const [cloudflareQuotaState, setCloudflareQuotaState] =
     useState<CloudflareQuotaState>(() =>
       getCloudflareQuotaState(typeof window === "undefined" ? undefined : window.localStorage),
@@ -112,6 +121,18 @@ export default function Upload() {
       })
       .catch(() => {
         if (!cancelled) setApiKeysState(null);
+      });
+    checkLocalTranscriptionBackends()
+      .then((status) => {
+        if (!cancelled) setLocalTranscriptionStatus(status);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setLocalTranscriptionStatus({
+            fasterWhisperAvailable: false,
+            parakeetAvailable: false,
+          });
+        }
       });
     return () => {
       cancelled = true;
@@ -157,10 +178,12 @@ export default function Upload() {
       cloudflareAccountId: apiKeys.cloudflareAccountId,
       cloudflareApiToken: apiKeys.cloudflareApiToken,
       deepgramApiKey: apiKeys.deepgramApiKey,
+      localBackendAvailable: localTranscriptionStatus?.fasterWhisperAvailable ?? false,
+      parakeetBackendAvailable: localTranscriptionStatus?.parakeetAvailable ?? false,
       manualProvider: apiKeys.manualTranscriptionProvider,
       cloudflareQuotaExhaustedToday: cloudflareQuotaState.isExhaustedToday,
     });
-  }, [apiKeys, budgetProfile, cloudflareQuotaState.isExhaustedToday, durationSec]);
+  }, [apiKeys, budgetProfile, cloudflareQuotaState.isExhaustedToday, durationSec, localTranscriptionStatus]);
 
   const speakerPlan = useMemo(() => {
     if (!apiKeys || !durationSec) return null;

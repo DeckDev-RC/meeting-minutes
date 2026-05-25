@@ -11,7 +11,8 @@ export interface ChunkDoneEvent {
 export type ChunkTranscriber = (
   audioPath: string,
   apiKey: string,
-  offsetSec: number
+  offsetSec: number,
+  isCancelled?: () => boolean,
 ) => Promise<TranscriptionSegment[]>;
 
 export interface TranscriptionQueueOptions {
@@ -131,7 +132,7 @@ export async function transcribeChunksConcurrently({
 
       let segments: TranscriptionSegment[];
       try {
-        segments = await transcribeChunk(chunk.audioPath, apiKey, chunk.offsetSec);
+        segments = await transcribeChunk(chunk.audioPath, apiKey, chunk.offsetSec, () => failed);
       } catch (error) {
         failed = true;
         throw error;

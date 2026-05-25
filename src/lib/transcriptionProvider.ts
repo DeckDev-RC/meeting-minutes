@@ -16,6 +16,8 @@ export interface TranscriptionBackendSelectionInput {
   cloudflareAccountId?: string | null;
   cloudflareApiToken?: string | null;
   deepgramApiKey?: string | null;
+  localBackendAvailable?: boolean;
+  parakeetBackendAvailable?: boolean;
   profile?: TranscriptionRoutingProfile | null;
   manualProvider?: TranscriptionBackend | null;
   unavailableBackends?: TranscriptionBackend[];
@@ -43,6 +45,12 @@ function isBackendConfigured(
   }
   if (backend === "groq") {
     return hasValue(input.groqApiKey);
+  }
+  if (backend === "parakeet-local") {
+    return input.parakeetBackendAvailable ?? true;
+  }
+  if (backend === "local") {
+    return input.localBackendAvailable ?? true;
   }
   return true;
 }
@@ -100,6 +108,8 @@ export function selectTranscriptionBackend({
   cloudflareAccountId,
   cloudflareApiToken,
   deepgramApiKey,
+  localBackendAvailable,
+  parakeetBackendAvailable,
   profile,
   manualProvider,
   unavailableBackends,
@@ -110,6 +120,8 @@ export function selectTranscriptionBackend({
     cloudflareAccountId,
     cloudflareApiToken,
     deepgramApiKey,
+    localBackendAvailable,
+    parakeetBackendAvailable,
     profile,
     manualProvider,
     unavailableBackends,

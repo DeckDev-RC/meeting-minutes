@@ -35,12 +35,16 @@ pub fn parakeet_backend_paths(project_root: &Path) -> ParakeetBackendPaths {
 pub fn resolve_parakeet_backend_from_dir(start_dir: &Path) -> Option<ParakeetBackendPaths> {
     for dir in start_dir.ancestors() {
         let paths = parakeet_backend_paths(dir);
-        if paths.python_exe.exists() && paths.script_path.exists() {
+        if parakeet_backend_exists(&paths) {
             return Some(paths);
         }
     }
 
     None
+}
+
+pub fn parakeet_backend_exists(paths: &ParakeetBackendPaths) -> bool {
+    paths.python_exe.exists() && paths.script_path.exists()
 }
 
 pub fn normalize_parakeet_model(model: Option<String>) -> String {
@@ -62,10 +66,20 @@ pub fn normalize_parakeet_model(model: Option<String>) -> String {
 }
 
 fn resolve_parakeet_backend() -> Result<ParakeetBackendPaths, String> {
-    let current_dir =
-        std::env::current_dir().map_err(|e| format!("Failed to resolve current directory: {e}"))?;
-    if let Some(paths) = resolve_parakeet_backend_from_dir(&current_dir) {
-        return Ok(paths);
+    for root in super::local_transcription_backend_roots_from_env()
+        .into_iter()
+        .chain(super::local_transcription_runtime_roots())
+    {
+        let paths = parakeet_backend_paths(&root);
+        if parakeet_backend_exists(&paths) {
+            return Ok(paths);
+        }
+    }
+
+    if let Ok(current_dir) = std::env::current_dir() {
+        if let Some(paths) = resolve_parakeet_backend_from_dir(&current_dir) {
+            return Ok(paths);
+        }
     }
 
     if let Ok(current_exe) = std::env::current_exe() {

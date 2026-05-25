@@ -120,6 +120,7 @@ assert.deepEqual(emptyResult, []);
 assert.equal(emptyProgressCalled, false);
 
 const failureProgress = [];
+let slowWorkerSawCancellation = false;
 await assert.rejects(
   transcribeChunksConcurrently({
     chunks: [
@@ -128,7 +129,7 @@ await assert.rejects(
     ],
     apiKey: "test-key",
     concurrency: 2,
-    transcribeChunk: async (audioPath, apiKey, offsetSec) => {
+    transcribeChunk: async (audioPath, apiKey, offsetSec, isCancelled) => {
       assert.equal(apiKey, "test-key");
       if (audioPath === "fail.flac") {
         await new Promise((resolve) => setTimeout(resolve, 5));
@@ -136,6 +137,7 @@ await assert.rejects(
       }
 
       await new Promise((resolve) => setTimeout(resolve, 30));
+      slowWorkerSawCancellation = isCancelled?.() ?? false;
       return [{ id: 0, start: offsetSec, end: offsetSec + 1, text: audioPath }];
     },
     onChunkDone: (event) => failureProgress.push(event),
@@ -145,6 +147,7 @@ await assert.rejects(
 
 await new Promise((resolve) => setTimeout(resolve, 40));
 assert.equal(failureProgress.length, 0);
+assert.equal(slowWorkerSawCancellation, true);
 
 const sortedResult = await transcribeChunksConcurrently({
   chunks: [

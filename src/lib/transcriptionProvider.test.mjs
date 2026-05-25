@@ -131,9 +131,24 @@ assert.deepEqual(
     primaryBackend: "cloudflare",
     cloudflareAccountId: "account",
     cloudflareApiToken: "token",
-    unavailableBackends: ["deepgram"],
+    deepgramApiKey: "dg_live",
+    localBackendAvailable: false,
+    parakeetBackendAvailable: false,
   }),
-  ["local"],
+  ["deepgram"],
+);
+
+assert.deepEqual(
+  selectFallbackTranscriptionBackends({
+    totalAudioSec: 3 * 3600,
+    primaryBackend: "cloudflare",
+    cloudflareAccountId: "account",
+    cloudflareApiToken: "token",
+    unavailableBackends: ["deepgram"],
+    localBackendAvailable: false,
+    parakeetBackendAvailable: false,
+  }),
+  [],
 );
 
 assert.deepEqual(

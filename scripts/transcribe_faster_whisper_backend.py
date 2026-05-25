@@ -17,6 +17,14 @@ def normalize_model_name(value):
     return MODEL_ALIASES.get(raw.lower(), raw or "turbo")
 
 
+def resolve_model_name(value):
+    normalized = normalize_model_name(value)
+    bundled_model_dir = os.environ.get("MEETING_MINUTES_FAST_WHISPER_MODEL_DIR", "").strip()
+    if normalized == "turbo" and bundled_model_dir and Path(bundled_model_dir).exists():
+        return bundled_model_dir
+    return normalized
+
+
 def resolve_device(value):
     raw = str(value or "auto").strip().lower()
     if raw in {"cpu", "cuda"}:
@@ -106,7 +114,7 @@ class FasterWhisperEngine:
         language="pt",
         vad_filter=True,
     ):
-        self.model = normalize_model_name(model)
+        self.model = resolve_model_name(model)
         self.device = resolve_device(device)
         self.compute_type = resolve_compute_type(compute_type, self.device)
         self.cpu_threads = positive_int(cpu_threads, max(1, (os.cpu_count() or 4) // 2))

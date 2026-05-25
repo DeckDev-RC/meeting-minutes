@@ -1,5 +1,14 @@
 import { useEffect, useState } from "react";
-import { checkLocalTranscriptionBackends, getApiKeys, setApiKeys } from "../lib/tauri";
+import { open } from "@tauri-apps/plugin-dialog";
+import {
+  checkLocalTranscriptionBackends,
+  getApiKeys,
+  getOfflineTranscriptionRuntimeStatus,
+  installOfflineTranscriptionRuntime,
+  removeOfflineTranscriptionRuntime,
+  setApiKeys,
+  type OfflineTranscriptionRuntimeStatus,
+} from "../lib/tauri";
 import {
   clearCloudflareQuotaExhausted,
   getCloudflareQuotaState,
@@ -7,6 +16,23 @@ import {
 } from "../lib/cloudTranscriptionHealth";
 import type { TranscriptionBackend } from "../lib/transcriptionProvider";
 import type { TranscriptionRoutingProfile } from "../lib/types";
+
+const DEFAULT_OFFLINE_RUNTIME_URL =
+  "https://github.com/DeckDev-RC/meeting-minutes/releases/latest/download/meeting-minutes-transcribe-runtime-windows-x64.zip";
+
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return "0 MB";
+  }
+  const units = ["B", "KB", "MB", "GB"];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
 
 export default function Settings() {
   const [groq, setGroq] = useState("");
@@ -23,6 +49,13 @@ export default function Settings() {
     fasterWhisperAvailable: boolean;
     parakeetAvailable: boolean;
   } | null>(null);
+  const [offlineRuntimeStatus, setOfflineRuntimeStatus] =
+    useState<OfflineTranscriptionRuntimeStatus | null>(null);
+  const [offlineRuntimeSource, setOfflineRuntimeSource] = useState(DEFAULT_OFFLINE_RUNTIME_URL);
+  const [offlineRuntimeSha256, setOfflineRuntimeSha256] = useState("");
+  const [offlineRuntimeBusy, setOfflineRuntimeBusy] = useState(false);
+  const [offlineRuntimeMessage, setOfflineRuntimeMessage] = useState("");
+  const [offlineRuntimeError, setOfflineRuntimeError] = useState("");
   const [cloudflareQuotaState, setCloudflareQuotaState] =
     useState<CloudflareQuotaState>(() =>
       getCloudflareQuotaState(typeof window === "undefined" ? undefined : window.localStorage),
@@ -59,7 +92,77 @@ export default function Settings() {
             parakeetAvailable: false,
           }),
         );
+      getOfflineTranscriptionRuntimeStatus()
+        .then(setOfflineRuntimeStatus)
+        .catch(() => setOfflineRuntimeStatus(null));
       setLoading(false);
+    }
+  };
+
+  const refreshLocalRuntime = async () => {
+    const [local, offline] = await Promise.all([
+      checkLocalTranscriptionBackends().catch(() => ({
+        fasterWhisperAvailable: false,
+        parakeetAvailable: false,
+      })),
+      getOfflineTranscriptionRuntimeStatus().catch(() => null),
+    ]);
+    setLocalStatus(local);
+    setOfflineRuntimeStatus(offline);
+  };
+
+  const installOfflineRuntime = async (source: string) => {
+    const normalizedSource = source.trim();
+    if (!normalizedSource) {
+      setOfflineRuntimeError("Informe uma URL ou selecione um pacote ZIP.");
+      return;
+    }
+    setOfflineRuntimeBusy(true);
+    setOfflineRuntimeError("");
+    setOfflineRuntimeMessage("Instalando pacote offline. Isso pode levar alguns minutos.");
+    try {
+      const status = await installOfflineTranscriptionRuntime(
+        normalizedSource,
+        offlineRuntimeSha256.trim() || undefined,
+      );
+      setOfflineRuntimeStatus(status);
+      await refreshLocalRuntime();
+      setOfflineRuntimeMessage("Modo offline instalado e pronto para fallback local.");
+    } catch (error) {
+      setOfflineRuntimeError(error instanceof Error ? error.message : String(error));
+      setOfflineRuntimeMessage("");
+    } finally {
+      setOfflineRuntimeBusy(false);
+    }
+  };
+
+  const installOfflineRuntimeFromUrl = () => installOfflineRuntime(offlineRuntimeSource);
+
+  const installOfflineRuntimeFromFile = async () => {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "Pacote offline", extensions: ["zip"] }],
+    });
+    if (typeof selected === "string") {
+      setOfflineRuntimeSource(selected);
+      await installOfflineRuntime(selected);
+    }
+  };
+
+  const removeOfflineRuntime = async () => {
+    setOfflineRuntimeBusy(true);
+    setOfflineRuntimeError("");
+    setOfflineRuntimeMessage("Removendo runtime offline.");
+    try {
+      const status = await removeOfflineTranscriptionRuntime();
+      setOfflineRuntimeStatus(status);
+      await refreshLocalRuntime();
+      setOfflineRuntimeMessage("Runtime offline removido.");
+    } catch (error) {
+      setOfflineRuntimeError(error instanceof Error ? error.message : String(error));
+      setOfflineRuntimeMessage("");
+    } finally {
+      setOfflineRuntimeBusy(false);
     }
   };
 
@@ -76,6 +179,7 @@ export default function Settings() {
   const localConfigured = Boolean(
     localStatus?.fasterWhisperAvailable || localStatus?.parakeetAvailable,
   );
+  const offlineRuntimeReady = Boolean(offlineRuntimeStatus?.fasterWhisperAvailable);
 
   const handleSave = async () => {
     const speakerCount = expectedSpeakers ? Number(expectedSpeakers) : undefined;
@@ -176,7 +280,9 @@ export default function Settings() {
                     ]
                       .filter(Boolean)
                       .join(", ")})`
-                  : "Ambiente local nao encontrado",
+                  : offlineRuntimeStatus?.installed
+                    ? "Runtime offline instalado, mas backend invalido"
+                    : "Runtime offline nao instalado",
                 tone: localConfigured ? "good" : "warn",
               },
             ].map((item) => (
@@ -198,6 +304,116 @@ export default function Settings() {
               </div>
             ))}
           </div>
+        </section>
+
+        <section className="mb-5 rounded-lg border border-gray-200 bg-white px-4 py-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <p className="text-sm font-semibold text-gray-950">Modo offline para usuarios comuns</p>
+              <p className="mt-1 text-xs leading-5 text-gray-500">
+                Instala um pacote local de transcricao em AppData. Depois disso, o app pode cair
+                para faster-whisper sem terminal, Python manual ou chaves de API.
+              </p>
+            </div>
+            <span
+              className={`inline-flex w-fit rounded-full px-2.5 py-1 text-xs font-semibold ${
+                offlineRuntimeReady
+                  ? "bg-emerald-50 text-emerald-700"
+                  : "bg-amber-50 text-amber-700"
+              }`}
+            >
+              {offlineRuntimeReady ? "Pronto" : "Nao instalado"}
+            </span>
+          </div>
+
+          <div className="mt-4 grid gap-3 md:grid-cols-3">
+            <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+              <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Backend</p>
+              <p className="mt-1 text-sm font-semibold text-gray-900">
+                {offlineRuntimeStatus?.fasterWhisperAvailable ? "faster-whisper" : "Indisponivel"}
+              </p>
+            </div>
+            <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+              <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Versao</p>
+              <p className="mt-1 text-sm font-semibold text-gray-900">
+                {offlineRuntimeStatus?.version || "Nao informada"}
+              </p>
+            </div>
+            <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+              <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Tamanho</p>
+              <p className="mt-1 text-sm font-semibold text-gray-900">
+                {formatBytes(offlineRuntimeStatus?.sizeBytes || 0)}
+              </p>
+            </div>
+          </div>
+
+          <p className="mt-3 break-all rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-500">
+            {offlineRuntimeStatus?.rootPath || "Caminho do runtime ainda nao resolvido."}
+          </p>
+
+          <div className="mt-4 space-y-3">
+            <div>
+              <label htmlFor="offline-runtime-source" className="mb-1.5 block text-sm font-semibold text-gray-800">
+                URL ou caminho do pacote ZIP offline
+              </label>
+              <input
+                id="offline-runtime-source"
+                value={offlineRuntimeSource}
+                onChange={(event) => setOfflineRuntimeSource(event.target.value)}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm shadow-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                placeholder={DEFAULT_OFFLINE_RUNTIME_URL}
+              />
+            </div>
+            <div>
+              <label htmlFor="offline-runtime-sha" className="mb-1.5 block text-sm font-semibold text-gray-800">
+                SHA-256 esperado (opcional)
+              </label>
+              <input
+                id="offline-runtime-sha"
+                value={offlineRuntimeSha256}
+                onChange={(event) => setOfflineRuntimeSha256(event.target.value)}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm shadow-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                placeholder="Cole o hash para validar o pacote antes de instalar"
+              />
+            </div>
+          </div>
+
+          <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center">
+            <button
+              type="button"
+              onClick={installOfflineRuntimeFromUrl}
+              disabled={offlineRuntimeBusy}
+              className="rounded-lg bg-gray-950 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-gray-800 disabled:cursor-not-allowed disabled:bg-gray-400"
+            >
+              Instalar/atualizar offline
+            </button>
+            <button
+              type="button"
+              onClick={installOfflineRuntimeFromFile}
+              disabled={offlineRuntimeBusy}
+              className="rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-semibold text-gray-800 shadow-sm transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-400"
+            >
+              Selecionar ZIP
+            </button>
+            {offlineRuntimeStatus?.installed && (
+              <button
+                type="button"
+                onClick={removeOfflineRuntime}
+                disabled={offlineRuntimeBusy}
+                className="rounded-lg border border-red-200 bg-white px-4 py-2.5 text-sm font-semibold text-red-700 shadow-sm transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:text-red-300"
+              >
+                Remover offline
+              </button>
+            )}
+          </div>
+          {offlineRuntimeMessage && (
+            <p className="mt-3 text-sm font-medium text-blue-700">{offlineRuntimeMessage}</p>
+          )}
+          {offlineRuntimeError && (
+            <p className="mt-3 rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-sm font-medium text-red-700">
+              {offlineRuntimeError}
+            </p>
+          )}
         </section>
 
         <div className="space-y-5">

@@ -10,6 +10,11 @@ on:
         description: "Release tag to create or update, for example v1.0.1"
         required: true
         type: string
+      build_offline_runtime:
+        description: "Build and upload the downloadable offline transcription runtime"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -42,6 +47,10 @@ jobs:
       - name: Prepare diarization runtime
         run: npm run setup:diarize-cpu
 
+      - name: Prepare offline transcription runtime
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_offline_runtime }}
+        run: npm run setup:transcribe-local
+
       - name: Test diarization runtime pack
         run: npm run test:runtime-pack
 
@@ -64,6 +73,10 @@ jobs:
       - name: Run Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
+      - name: Build offline transcription runtime pack
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_offline_runtime }}
+        run: npm run runtime:transcribe:pack
+
       - name: Build and upload release assets
         uses: tauri-apps/tauri-action@v0.6.2
         env:
@@ -77,3 +90,11 @@ jobs:
           tauriScript: npm run tauri
           retryAttempts: 1
           uploadPlainBinary: false
+
+      - name: Upload offline transcription runtime pack
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_offline_runtime }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$env:RELEASE_TAG" dist/runtime/meeting-minutes-transcribe-runtime-*.zip --clobber

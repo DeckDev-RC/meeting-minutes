@@ -6,6 +6,7 @@ pub mod generate;
 pub mod keyring;
 pub mod minutes_pipeline;
 pub mod minutes_validator;
+pub mod offline_runtime;
 pub mod storage;
 pub mod transcribe;
 pub mod transcription_router;

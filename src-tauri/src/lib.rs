@@ -203,6 +203,7 @@ pub fn run() {
         .setup(|app| {
             if let Ok(resource_dir) = app.path().resource_dir() {
                 commands::diarize::configure_bundled_modern_cpu_backend(&resource_dir);
+                commands::transcribe::configure_bundled_local_transcription_backend(&resource_dir);
             }
             let app_data_dir = app
                 .path()
@@ -272,6 +273,9 @@ pub fn run() {
             commands::keyring::get_api_secret,
             commands::keyring::set_api_secret,
             commands::keyring::list_api_secret_status,
+            commands::offline_runtime::get_offline_transcription_runtime_status,
+            commands::offline_runtime::install_offline_transcription_runtime,
+            commands::offline_runtime::remove_offline_transcription_runtime,
             get_api_keys,
             set_api_keys,
         ])

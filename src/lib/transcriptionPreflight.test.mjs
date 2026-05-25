@@ -66,6 +66,19 @@ assert.deepEqual(lowCost.fallbackBackends, ["deepgram", "groq", "local"]);
 assert.equal(lowCost.quotaRisk.level, "high");
 assert.equal(lowCost.deepgramFallbackCost.amount.toFixed(2), "1.28");
 
+const installedLowCost = buildTranscriptionPreflight({
+  durationSec: 3 * 3600,
+  budgetProfile: "low-cost",
+  cloudflareAccountId: "account",
+  cloudflareApiToken: "token",
+  deepgramApiKey: "deepgram",
+  localBackendAvailable: false,
+  parakeetBackendAvailable: false,
+});
+
+assert.equal(installedLowCost.backend, "cloudflare");
+assert.deepEqual(installedLowCost.fallbackBackends, ["deepgram"]);
+
 const exhausted = buildTranscriptionPreflight({
   durationSec: 3 * 3600,
   budgetProfile: "low-cost",

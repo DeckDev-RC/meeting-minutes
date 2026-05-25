@@ -17,6 +17,7 @@ import {
   type LiveProcessingState,
 } from "../../lib/liveProcessing";
 import {
+  checkLocalTranscriptionBackends,
   transcribeChunk,
   transcribeChunkCloudflare,
   transcribeChunkDeepgram,
@@ -107,15 +108,26 @@ export const transcribePendingChunks = async ({
   updatePipelineProgress,
 }: TranscriptionStageContext): Promise<TranscriptionSegment[]> => {
   let transcribedAudioSec = completedAudioSec;
-  let transcribedChunkCount = completedStoredChunks.length;      // Step 2: Transcribe pending chunks.
-      setStep("transcribe");
-      setStepStatus("transcribe", "running");
-      const transcriptionBackend = selectTranscriptionBackend({
+  let transcribedChunkCount = completedStoredChunks.length;
+
+  // Step 2: Transcribe pending chunks.
+  setStep("transcribe");
+  setStepStatus("transcribe", "running");
+  const localTranscriptionStatus = await checkLocalTranscriptionBackends().catch(() => ({
+    fasterWhisperAvailable: false,
+    parakeetAvailable: false,
+  }));
+  const localAvailability = {
+    localBackendAvailable: localTranscriptionStatus.fasterWhisperAvailable,
+    parakeetBackendAvailable: localTranscriptionStatus.parakeetAvailable,
+  };
+  const transcriptionBackend = selectTranscriptionBackend({
         totalAudioSec,
         groqApiKey: keys.groq,
         cloudflareAccountId: keys.cloudflareAccountId,
         cloudflareApiToken: keys.cloudflareApiToken,
         deepgramApiKey: keys.deepgramApiKey,
+        ...localAvailability,
         profile: meetingTranscriptionProfile,
         manualProvider: keys.manualTranscriptionProvider,
         unavailableBackends: getCloudflareQuotaState(window.localStorage).isExhaustedToday
@@ -173,6 +185,7 @@ export const transcribePendingChunks = async ({
           cloudflareAccountId: keys.cloudflareAccountId,
           cloudflareApiToken: keys.cloudflareApiToken,
           deepgramApiKey: keys.deepgramApiKey,
+          ...localAvailability,
           profile: meetingTranscriptionProfile,
           manualProvider: keys.manualTranscriptionProvider,
           primaryBackend: backend,
@@ -226,6 +239,7 @@ export const transcribePendingChunks = async ({
           cloudflareAccountId: keys.cloudflareAccountId,
           cloudflareApiToken: keys.cloudflareApiToken,
           deepgramApiKey: keys.deepgramApiKey,
+          ...localAvailability,
           profile: meetingTranscriptionProfile,
           manualProvider: keys.manualTranscriptionProvider,
           primaryBackend: backend,
@@ -367,8 +381,11 @@ export const transcribePendingChunks = async ({
           chunks: pendingChunks,
           apiKey: remoteApiKey,
           concurrency: transcriptionConcurrencyForProfile(processingProfile),
-          transcribeChunk: async (audioPath, _apiKey, offsetSec) => {
+          transcribeChunk: async (audioPath, _apiKey, offsetSec, isCancelled) => {
             const chunk = pendingChunkByPath.get(audioPath);
+            if (isCancelled?.()) {
+              return [];
+            }
             if (chunk) {
               await updateProcessingChunkResult(meetingId, chunk.index, "running");
               patchStoredChunk(chunk.index, { status: "running" });
@@ -380,6 +397,9 @@ export const transcribePendingChunks = async ({
                 offsetSec,
                 chunk?.index,
               );
+              if (isCancelled?.()) {
+                return transcriptionResult.segments;
+              }
               let segments = transcriptionResult.segments;
               let segmentBackend = transcriptionResult.backend;
               if (
@@ -419,6 +439,9 @@ export const transcribePendingChunks = async ({
                   }
                 }
               }
+              if (isCancelled?.()) {
+                return segments;
+              }
               if (chunk) {
                 commitLiveState(meetingId, (state) =>
                   appendLiveTranscript(state, chunk.index, segments),
@@ -449,6 +472,9 @@ export const transcribePendingChunks = async ({
               }
               return segments;
             } catch (err) {
+              if (isCancelled?.()) {
+                throw err;
+              }
               if (chunk) {
                 addLiveLog(
                   meetingId,

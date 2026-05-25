@@ -148,6 +148,31 @@ export const checkLocalTranscriptionBackends = () =>
     parakeetAvailable: boolean;
   }>('check_local_transcription_backends');
 
+export interface OfflineTranscriptionRuntimeStatus {
+  installed: boolean;
+  fasterWhisperAvailable: boolean;
+  parakeetAvailable: boolean;
+  rootPath: string;
+  source: string;
+  version?: string | null;
+  sizeBytes: number;
+}
+
+export const getOfflineTranscriptionRuntimeStatus = () =>
+  invoke<OfflineTranscriptionRuntimeStatus>('get_offline_transcription_runtime_status');
+
+export const installOfflineTranscriptionRuntime = (
+  source: string,
+  expectedSha256?: string | null
+) =>
+  invoke<OfflineTranscriptionRuntimeStatus>('install_offline_transcription_runtime', {
+    source,
+    expectedSha256,
+  });
+
+export const removeOfflineTranscriptionRuntime = () =>
+  invoke<OfflineTranscriptionRuntimeStatus>('remove_offline_transcription_runtime');
+
 export const diarizeTranscription = (segmentsJson: string, geminiApiKey: string) =>
   invoke<DiarizedResult>('diarize_transcription', { segmentsJson, geminiApiKey });
 

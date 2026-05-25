@@ -22,6 +22,12 @@ Release, and uploads the generated installers as release assets.
 You can also run the workflow manually from GitHub Actions and provide a
 `release_tag`.
 
+To publish the downloadable offline transcription runtime, run the workflow
+manually with `build_offline_runtime=true`. It uploads
+`meeting-minutes-transcribe-runtime-windows-x64.zip` and the versioned ZIP to
+the same GitHub Release. The app can install this package from
+`Configuracoes > Modo offline`.
+
 ## Local build and handoff
 
 1. Prepare the local diarization runtime when it is not available yet:
@@ -72,6 +78,42 @@ npm run runtime:diarize:install -- -PackPath "C:\path\meeting-minutes-diarize-ru
 
 The app resolves the bundled runtime first through the Tauri resource directory,
 and still supports `MEETING_MINUTES_DIARIZE_ROOT` for development and repair.
+
+## Offline transcription runtime
+
+The normal installer does not embed local ASR by default, because the
+transcription runtime and model are large. The product supports two delivery
+paths:
+
+- in-app download: publish the runtime ZIP with the release workflow and install
+  it from `Configuracoes > Modo offline`;
+- full offline installer: build locally with `npm run tauri:build:offline`.
+
+The in-app runtime is installed under AppData:
+
+```powershell
+%APPDATA%\com.agregar.meeting-minutes\runtime\transcribe
+```
+
+Generate the downloadable ZIP locally when needed:
+
+```powershell
+npm run setup:transcribe-local
+npm run runtime:transcribe:pack
+```
+
+Generate a full offline bundle for clients that need one installer with local
+transcription included:
+
+```powershell
+npm run setup:diarize-cpu
+npm run setup:transcribe-local
+npm run tauri:build:offline
+```
+
+The offline bundle script stages `src-tauri/resources/transcribe/` only for that
+build, copies the generated installers to `dist/offline-bundle/` with an
+`-offline` suffix, and cleans the temporary resource directory before exiting.
 
 ## Alternative: Git LFS
 

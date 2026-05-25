@@ -691,6 +691,10 @@ export const runProcessingPipeline = async (
       console.error("Processing pipeline failed:", err);
       const step = useMeetingStore.getState().currentStep;
       if (step) setStepStatus(step, "error");
+      if (step === "transcribe") {
+        setStepStatus("diarize", "pending");
+        setStepStatus("generate", "pending");
+      }
       addLiveLog(meetingId, "error", formatError(err) || "Erro desconhecido no processamento.");
       setError(formatError(err) || "Erro desconhecido");
       recordProcessingJob(

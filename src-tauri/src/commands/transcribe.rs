@@ -48,6 +48,8 @@ fn hide_command_window(command: &mut Command) {
 pub struct FasterWhisperBackendPaths {
     pub python_exe: PathBuf,
     pub script_path: PathBuf,
+    pub python_path: Vec<PathBuf>,
+    pub model_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -85,14 +87,132 @@ fn audio_upload_metadata(audio_path: &str) -> (String, String) {
 }
 
 pub fn faster_whisper_backend_paths(project_root: &Path) -> FasterWhisperBackendPaths {
+    let portable_python = project_root.join(".python").join("python.exe");
+    let script_path = project_root
+        .join("scripts")
+        .join("transcribe_faster_whisper_backend.py");
+    let site_packages = project_root
+        .join(".venv-transcribe")
+        .join("Lib")
+        .join("site-packages");
+    let model_dir = project_root
+        .join("models")
+        .join("faster-whisper-turbo")
+        .is_dir()
+        .then(|| project_root.join("models").join("faster-whisper-turbo"));
+
+    if portable_python.exists() {
+        return FasterWhisperBackendPaths {
+            python_exe: portable_python,
+            script_path,
+            python_path: vec![site_packages],
+            model_dir,
+        };
+    }
+
     FasterWhisperBackendPaths {
         python_exe: project_root
             .join(".venv-transcribe")
             .join("Scripts")
             .join("python.exe"),
-        script_path: project_root
-            .join("scripts")
-            .join("transcribe_faster_whisper_backend.py"),
+        script_path,
+        python_path: Vec::new(),
+        model_dir,
+    }
+}
+
+pub fn faster_whisper_backend_exists(paths: &FasterWhisperBackendPaths) -> bool {
+    paths.python_exe.exists()
+        && paths.script_path.exists()
+        && paths.python_path.iter().all(|path| path.exists())
+}
+
+fn configure_faster_whisper_python_env(command: &mut Command, backend: &FasterWhisperBackendPaths) {
+    if !backend.python_path.is_empty() {
+        if let Ok(python_path) = std::env::join_paths(&backend.python_path) {
+            command.env("PYTHONPATH", python_path);
+        }
+        command.env("PYTHONNOUSERSITE", "1");
+    }
+    if let Some(model_dir) = &backend.model_dir {
+        command.env("MEETING_MINUTES_FAST_WHISPER_MODEL_DIR", model_dir);
+    }
+}
+
+fn explicit_faster_whisper_backend_paths() -> Option<FasterWhisperBackendPaths> {
+    let python_exe = std::env::var_os("MEETING_MINUTES_TRANSCRIBE_PYTHON").map(PathBuf::from);
+    let script_path = std::env::var_os("MEETING_MINUTES_TRANSCRIBE_SCRIPT").map(PathBuf::from);
+    match (python_exe, script_path) {
+        (Some(python_exe), Some(script_path)) => {
+            let paths = FasterWhisperBackendPaths {
+                python_exe,
+                script_path,
+                python_path: Vec::new(),
+                model_dir: std::env::var_os("MEETING_MINUTES_FAST_WHISPER_MODEL_DIR")
+                    .map(PathBuf::from),
+            };
+            faster_whisper_backend_exists(&paths).then_some(paths)
+        }
+        _ => None,
+    }
+}
+
+fn local_transcription_backend_roots_from_env() -> Vec<PathBuf> {
+    std::env::var_os("MEETING_MINUTES_TRANSCRIBE_ROOT")
+        .map(PathBuf::from)
+        .into_iter()
+        .collect()
+}
+
+pub fn local_transcription_runtime_root(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join("runtime").join("transcribe")
+}
+
+pub fn local_transcription_runtime_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        roots.push(
+            PathBuf::from(appdata)
+                .join("com.agregar.meeting-minutes")
+                .join("runtime")
+                .join("transcribe"),
+        );
+    }
+
+    if let Some(localappdata) = std::env::var_os("LOCALAPPDATA") {
+        let localappdata = PathBuf::from(localappdata);
+        roots.push(
+            localappdata
+                .join("com.agregar.meeting-minutes")
+                .join("runtime")
+                .join("transcribe"),
+        );
+        roots.push(
+            localappdata
+                .join("Meeting Minutes AI")
+                .join("runtime")
+                .join("transcribe"),
+        );
+    }
+
+    roots
+}
+
+pub fn bundled_local_transcription_backend_root(resource_dir: &Path) -> Option<PathBuf> {
+    let candidates = [resource_dir.join("transcribe"), resource_dir.to_path_buf()];
+    candidates
+        .into_iter()
+        .find(|root| faster_whisper_backend_exists(&faster_whisper_backend_paths(root)))
+}
+
+pub fn configure_bundled_local_transcription_backend(resource_dir: &Path) {
+    if std::env::var_os("MEETING_MINUTES_TRANSCRIBE_ROOT").is_some() {
+        return;
+    }
+
+    if let Some(root) = bundled_local_transcription_backend_root(resource_dir) {
+        std::env::set_var("MEETING_MINUTES_TRANSCRIBE_ROOT", root);
     }
 }
 
@@ -101,7 +221,7 @@ pub fn resolve_faster_whisper_backend_from_dir(
 ) -> Option<FasterWhisperBackendPaths> {
     for dir in start_dir.ancestors() {
         let paths = faster_whisper_backend_paths(dir);
-        if paths.python_exe.exists() && paths.script_path.exists() {
+        if faster_whisper_backend_exists(&paths) {
             return Some(paths);
         }
     }
@@ -409,6 +529,31 @@ mod tests {
         assert!(paths
             .script_path
             .ends_with("scripts/transcribe_faster_whisper_backend.py"));
+        assert!(paths.python_path.is_empty());
+    }
+
+    #[test]
+    fn faster_whisper_backend_paths_support_portable_runtime_layout() {
+        let root = std::env::temp_dir().join(format!(
+            "meeting-minutes-transcribe-paths-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(root.join(".python")).unwrap();
+        std::fs::create_dir_all(root.join(".venv-transcribe/Lib/site-packages")).unwrap();
+        std::fs::create_dir_all(root.join("scripts")).unwrap();
+        std::fs::write(root.join(".python/python.exe"), "").unwrap();
+        std::fs::write(
+            root.join("scripts/transcribe_faster_whisper_backend.py"),
+            "",
+        )
+        .unwrap();
+
+        let paths = faster_whisper_backend_paths(&root);
+        assert!(paths.python_exe.ends_with(".python/python.exe"));
+        assert_eq!(paths.python_path.len(), 1);
+        assert!(faster_whisper_backend_exists(&paths));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -680,10 +825,24 @@ pub async fn transcribe_chunk_deepgram_with_client(
 }
 
 fn resolve_faster_whisper_backend() -> Result<FasterWhisperBackendPaths, String> {
-    let current_dir =
-        std::env::current_dir().map_err(|e| format!("Failed to resolve current directory: {e}"))?;
-    if let Some(paths) = resolve_faster_whisper_backend_from_dir(&current_dir) {
+    if let Some(paths) = explicit_faster_whisper_backend_paths() {
         return Ok(paths);
+    }
+
+    for root in local_transcription_backend_roots_from_env()
+        .into_iter()
+        .chain(local_transcription_runtime_roots())
+    {
+        let paths = faster_whisper_backend_paths(&root);
+        if faster_whisper_backend_exists(&paths) {
+            return Ok(paths);
+        }
+    }
+
+    if let Ok(current_dir) = std::env::current_dir() {
+        if let Some(paths) = resolve_faster_whisper_backend_from_dir(&current_dir) {
+            return Ok(paths);
+        }
     }
 
     if let Ok(current_exe) = std::env::current_exe() {
@@ -700,6 +859,10 @@ fn resolve_faster_whisper_backend() -> Result<FasterWhisperBackendPaths, String>
     )
 }
 
+pub fn faster_whisper_backend_available() -> bool {
+    resolve_faster_whisper_backend().is_ok()
+}
+
 fn available_cpu_threads_for_transcription() -> usize {
     std::thread::available_parallelism()
         .map(|value| value.get())
@@ -710,7 +873,7 @@ fn available_cpu_threads_for_transcription() -> usize {
 #[command]
 pub fn check_local_transcription_backends() -> LocalTranscriptionBackendStatus {
     LocalTranscriptionBackendStatus {
-        faster_whisper_available: resolve_faster_whisper_backend().is_ok(),
+        faster_whisper_available: faster_whisper_backend_available(),
         parakeet_available: parakeet::parakeet_backend_available(),
     }
 }
@@ -741,6 +904,7 @@ pub async fn transcribe_chunks_with_faster_whisper(
     tokio::task::spawn_blocking(move || {
         let mut command = Command::new(&backend.python_exe);
         hide_command_window(&mut command);
+        configure_faster_whisper_python_env(&mut command, &backend);
         command
             .env("OMP_NUM_THREADS", cpu_threads.to_string())
             .arg(&backend.script_path)

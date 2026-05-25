@@ -34,7 +34,8 @@
     ],
     "externalBin": ["binaries/ffmpeg"],
     "resources": {
-      "resources/diarize": "diarize"
+      "resources/diarize": "diarize",
+      "resources/transcribe": "transcribe"
     }
   }
 }

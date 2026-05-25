@@ -7,6 +7,9 @@ src-tauri/resources/*
 !src-tauri/resources/diarize/
 src-tauri/resources/diarize/*
 !src-tauri/resources/diarize/.gitkeep
+!src-tauri/resources/transcribe/
+src-tauri/resources/transcribe/*
+!src-tauri/resources/transcribe/.gitkeep
 src-tauri/binaries/ffmpeg*
 benchmarks/data/
 benchmarks/runs/
