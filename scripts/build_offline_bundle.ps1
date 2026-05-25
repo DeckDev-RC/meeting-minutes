@@ -26,6 +26,18 @@ function Clear-TranscribeResource([string]$ProjectRootPath) {
   New-Item -ItemType File -Force -Path (Join-Path $resourceDir ".gitkeep") | Out-Null
 }
 
+function Resolve-CargoTargetDir([string]$ProjectRootPath) {
+  $configPath = Join-Path $ProjectRootPath "src-tauri\.cargo\config.toml"
+  if (Test-Path -LiteralPath $configPath -PathType Leaf) {
+    foreach ($line in Get-Content -LiteralPath $configPath) {
+      if ($line -match '^\s*target-dir\s*=\s*"(.+?)"\s*$') {
+        return Resolve-FullPath $Matches[1]
+      }
+    }
+  }
+  return Resolve-FullPath (Join-Path $ProjectRootPath "src-tauri\target")
+}
+
 $projectRootPath = Resolve-FullPath $ProjectRoot
 if ([string]::IsNullOrWhiteSpace($OutDir)) {
   $OutDir = Join-Path $projectRootPath "dist\offline-bundle"
@@ -54,7 +66,8 @@ try {
     throw "tauri:build falhou"
   }
 
-  $bundleRoot = Join-Path $projectRootPath "src-tauri\target\release\bundle"
+  $cargoTargetDir = Resolve-CargoTargetDir $projectRootPath
+  $bundleRoot = Join-Path $cargoTargetDir "release\bundle"
   $artifacts = Get-ChildItem -LiteralPath $bundleRoot -Recurse -File -Include *.exe,*.msi -ErrorAction SilentlyContinue
   foreach ($artifact in $artifacts) {
     $name = [System.IO.Path]::GetFileNameWithoutExtension($artifact.Name)
