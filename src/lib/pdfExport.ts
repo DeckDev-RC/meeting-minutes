@@ -23,6 +23,16 @@ const PDF_KEEP_SELECTORS = [
   'h2',
 ].join(',');
 
+export interface PdfExportProgress {
+  phase: 'preparing' | 'rendering' | 'assembling' | 'complete';
+  percent: number;
+  detail: string;
+}
+
+export interface PdfExportOptions {
+  onProgress?: (progress: PdfExportProgress) => void;
+}
+
 function createExportSurface(minutesHtmlElement: HTMLElement) {
   const host = document.createElement('div');
   host.className = 'pdf-export-host';
@@ -195,8 +205,10 @@ function sliceCanvasPage(
 
 export async function exportToPDF(
   minutesHtmlElement: HTMLElement,
-  title: string
+  title: string,
+  options: PdfExportOptions = {},
 ): Promise<Uint8Array> {
+  const reportProgress = (progress: PdfExportProgress) => options.onProgress?.(progress);
   const pdf = new jsPDF({
     orientation: 'portrait',
     unit: 'mm',
@@ -213,6 +225,7 @@ export async function exportToPDF(
   const surface = createExportSurface(minutesHtmlElement);
 
   try {
+    reportProgress({ phase: 'preparing', percent: 5, detail: 'Preparando documento' });
     await document.fonts?.ready;
 
     const pageContentHeight = pageHeight - margin * 2 - footerSpace;
@@ -242,6 +255,7 @@ export async function exportToPDF(
     });
 
     if (renderStrategy.mode === 'single-canvas') {
+      reportProgress({ phase: 'rendering', percent: 20, detail: 'Renderizando documento' });
       const fullCanvas = await html2canvas(surface.host, {
         scale: PDF_CANVAS_SCALE,
         useCORS: true,
@@ -255,6 +269,11 @@ export async function exportToPDF(
       });
 
       for (let pageIndex = 0; pageIndex < pageSlices.length; pageIndex += 1) {
+        reportProgress({
+          phase: 'assembling',
+          percent: Math.min(95, 35 + Math.round(((pageIndex + 1) / pageSlices.length) * 55)),
+          detail: `Montando pagina ${pageIndex + 1} de ${pageSlices.length}`,
+        });
         const page = pageSlices[pageIndex];
         const pageCanvas =
           pageSlices.length === 1 ? fullCanvas : sliceCanvasPage(fullCanvas, page);
@@ -274,6 +293,11 @@ export async function exportToPDF(
     } else {
       for (let pageIndex = 0; pageIndex < pageSlices.length; pageIndex += 1) {
         const page = pageSlices[pageIndex];
+        reportProgress({
+          phase: 'rendering',
+          percent: Math.min(90, 15 + Math.round((pageIndex / pageSlices.length) * 70)),
+          detail: `Renderizando pagina ${pageIndex + 1} de ${pageSlices.length}`,
+        });
         const canvas = await html2canvas(surface.host, {
           scale: PDF_CANVAS_SCALE,
           useCORS: true,
@@ -302,6 +326,7 @@ export async function exportToPDF(
       }
     }
 
+    reportProgress({ phase: 'complete', percent: 100, detail: 'PDF pronto' });
     const arrayBuffer = pdf.output('arraybuffer');
     return new Uint8Array(arrayBuffer);
   } finally {

@@ -7,6 +7,12 @@ import type {
   StructuredDecisionPatch,
   StructuredEvidence,
 } from "../../lib/types";
+import {
+  createActionDraftState,
+  createDecisionDraftState,
+  mergeActionDraftState,
+  mergeDecisionDraftState,
+} from "./structuredDrafts";
 
 export const formatMinuteTime = (seconds: number) => {
   const safe = Math.max(0, Math.round(Number.isFinite(seconds) ? seconds : 0));
@@ -79,33 +85,25 @@ export function StructuredDecisionsPanel({
   evidencesById: Map<string, StructuredEvidence>;
   onUpdateDecision?: (decisionId: string, patch: StructuredDecisionPatch) => Promise<void>;
 }) {
-  const [drafts, setDrafts] = useState<Record<string, StructuredDecisionPatch>>({});
+  const [draftState, setDraftState] = useState(() => createDecisionDraftState(decisions));
+  const drafts = draftState.values;
 
   useEffect(() => {
-    setDrafts(
-      Object.fromEntries(
-        decisions.map((decision) => [
-          decision.id,
-          {
-            title: decision.title,
-            owner: decision.owner,
-            timestampSec: decision.timestampSec,
-            evidence: decision.evidence,
-          },
-        ]),
-      ),
-    );
+    setDraftState((current) => mergeDecisionDraftState(decisions, current));
   }, [decisions]);
 
   const updateDraft = (
     decisionId: string,
     patch: Partial<StructuredDecisionPatch>,
   ) => {
-    setDrafts((current) => ({
+    setDraftState((current) => ({
       ...current,
-      [decisionId]: {
-        ...current[decisionId],
-        ...patch,
+      values: {
+        ...current.values,
+        [decisionId]: {
+          ...current.values[decisionId],
+          ...patch,
+        },
       },
     }));
   };
@@ -251,34 +249,22 @@ export function StructuredActionsPanel({
   evidencesById: Map<string, StructuredEvidence>;
   onUpdateAction?: (actionId: string, patch: StructuredActionPatch) => Promise<void>;
 }) {
-  const [drafts, setDrafts] = useState<Record<string, StructuredActionPatch>>({});
+  const [draftState, setDraftState] = useState(() => createActionDraftState(actions));
+  const drafts = draftState.values;
 
   useEffect(() => {
-    setDrafts(
-      Object.fromEntries(
-        actions.map((action) => [
-          action.id,
-          {
-            task: action.task,
-            owner: action.owner,
-            deadline: action.deadline,
-            timestampSec: action.timestampSec,
-            evidence: action.evidence,
-            status: action.status,
-            priority: action.priority,
-            completedAt: action.completedAt,
-          },
-        ]),
-      ),
-    );
+    setDraftState((current) => mergeActionDraftState(actions, current));
   }, [actions]);
 
   const updateDraft = (actionId: string, patch: Partial<StructuredActionPatch>) => {
-    setDrafts((current) => ({
+    setDraftState((current) => ({
       ...current,
-      [actionId]: {
-        ...current[actionId],
-        ...patch,
+      values: {
+        ...current.values,
+        [actionId]: {
+          ...current.values[actionId],
+          ...patch,
+        },
       },
     }));
   };

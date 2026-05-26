@@ -10,13 +10,40 @@ const navItems = [
   { path: "/settings", label: "Configuracoes", hint: "Chaves de API" },
 ];
 
-export default function Layout({ children }: { children: ReactNode }) {
+function ProcessingNavLink() {
   const location = useLocation();
-  const navigate = useNavigate();
-  const { currentMeetingId, progress, stepStatus, error } = useMeetingStore();
+  const currentMeetingId = useMeetingStore((state) => state.currentMeetingId);
+  const progress = useMeetingStore((state) => state.progress);
+  const stepStatus = useMeetingStore((state) => state.stepStatus);
+  const error = useMeetingStore((state) => state.error);
   const hasRunningStep = Object.values(stepStatus).some((status) => status === "running");
   const showProcessingLink =
     !!currentMeetingId && (hasRunningStep || !!error || (progress > 0 && progress < 100));
+
+  if (!showProcessingLink) {
+    return null;
+  }
+
+  return (
+    <Link
+      to={`/processing/${currentMeetingId}`}
+      className={`col-span-2 block rounded-lg border px-4 py-3 text-sm shadow-sm sm:col-span-4 md:mb-3 md:min-w-0 ${
+        location.pathname.startsWith("/processing/")
+          ? "border-blue-200 bg-blue-50 text-blue-700"
+          : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+      }`}
+    >
+      <span className="block font-medium">
+        {error ? "Processamento com erro" : "Processamento ativo"}
+      </span>
+      <span className="mt-1 block text-xs text-gray-500">{progress}% concluido</span>
+    </Link>
+  );
+}
+
+export default function Layout({ children }: { children: ReactNode }) {
+  const location = useLocation();
+  const navigate = useNavigate();
   const shortcuts = useMemo(
     () => [
       { key: "u", mod: true, handler: () => navigate("/upload") },
@@ -43,21 +70,7 @@ export default function Layout({ children }: { children: ReactNode }) {
           </div>
         </div>
         <nav className="grid grid-cols-2 gap-2 p-3 sm:grid-cols-4 md:block md:flex-1">
-          {showProcessingLink && (
-            <Link
-              to={`/processing/${currentMeetingId}`}
-              className={`col-span-2 block rounded-lg border px-4 py-3 text-sm shadow-sm sm:col-span-4 md:mb-3 md:min-w-0 ${
-                location.pathname.startsWith("/processing/")
-                  ? "border-blue-200 bg-blue-50 text-blue-700"
-                  : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
-              }`}
-            >
-              <span className="block font-medium">
-                {error ? "Processamento com erro" : "Processamento ativo"}
-              </span>
-              <span className="mt-1 block text-xs text-gray-500">{progress}% concluido</span>
-            </Link>
-          )}
+          <ProcessingNavLink />
           {navItems.map((item) => (
             <Link
               key={item.path}

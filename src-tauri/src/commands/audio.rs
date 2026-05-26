@@ -13,7 +13,6 @@ pub use metadata::{
 
 use crate::models::audio::{ExportedChunk, PreparedAudio, SilenceRange, SmartChunkOptions};
 use crate::models::meeting::MeetingMetadata;
-use std::fs;
 use std::path::Path;
 use tauri::command;
 use tauri_plugin_shell::ShellExt;
@@ -114,7 +113,9 @@ pub async fn chunk_audio(
     output_dir: String,
     chunk_duration_sec: u32,
 ) -> Result<Vec<String>, String> {
-    fs::create_dir_all(&output_dir).map_err(|e| e.to_string())?;
+    tokio::fs::create_dir_all(&output_dir)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let pattern = format!("{}/chunk_%03d.mp3", output_dir);
 
@@ -201,7 +202,9 @@ pub async fn create_smart_chunks(
     options: Option<SmartChunkOptions>,
 ) -> Result<Vec<ExportedChunk>, String> {
     let opts = options.unwrap_or_default();
-    fs::create_dir_all(&output_dir).map_err(|e| e.to_string())?;
+    tokio::fs::create_dir_all(&output_dir)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let silences = cached_or_detect_silences(
         app.clone(),
@@ -320,9 +323,13 @@ pub async fn prepare_audio_and_chunks(
     options: Option<SmartChunkOptions>,
 ) -> Result<PreparedAudio, String> {
     let opts = options.unwrap_or_default();
-    fs::create_dir_all(&chunk_output_dir).map_err(|e| e.to_string())?;
+    tokio::fs::create_dir_all(&chunk_output_dir)
+        .await
+        .map_err(|e| e.to_string())?;
     if let Some(parent) = Path::new(&audio_output_path).parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| e.to_string())?;
     }
 
     if !should_use_parallel_prepare(&opts) {

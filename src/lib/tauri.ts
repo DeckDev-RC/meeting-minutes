@@ -337,8 +337,8 @@ export const generateAtaFromFactsStreaming = (
 export const saveMeeting = (meeting: Partial<Meeting>) =>
   invoke<string>('save_meeting', { meeting });
 
-export const getMeetings = () =>
-  invoke<Meeting[]>('get_meetings');
+export const getMeetings = (limit = 200, offset = 0) =>
+  invoke<Meeting[]>('get_meetings', { limit, offset });
 
 export const updateMeetingStatus = (id: string, status: string) =>
   invoke<void>('update_meeting_status', { id, status });

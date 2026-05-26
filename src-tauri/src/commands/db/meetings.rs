@@ -1,7 +1,10 @@
 use super::{processing_jobs::finalize_processing_jobs_for_meeting_record, DbState};
 use crate::models::meeting::Meeting;
-use rusqlite::params;
+use rusqlite::{params, Connection};
 use tauri::command;
+
+const DEFAULT_MEETINGS_LIMIT: i64 = 200;
+const MAX_MEETINGS_LIMIT: i64 = 500;
 
 fn normalize_processing_profile(value: Option<&str>) -> &str {
     match value {
@@ -62,30 +65,46 @@ pub fn save_meeting(
     Ok(id)
 }
 
-#[command]
-pub fn get_meetings(state: tauri::State<'_, DbState>) -> Result<Vec<Meeting>, String> {
-    let db = state.0.lock().map_err(|e| e.to_string())?;
+fn normalize_limit(limit: Option<i64>) -> i64 {
+    limit
+        .unwrap_or(DEFAULT_MEETINGS_LIMIT)
+        .clamp(1, MAX_MEETINGS_LIMIT)
+}
+
+fn normalize_offset(offset: Option<i64>) -> i64 {
+    offset.unwrap_or(0).max(0)
+}
+
+pub(super) fn get_meetings_record(
+    db: &Connection,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<Vec<Meeting>, String> {
     let mut stmt = db.prepare(
         "SELECT id, title, file_path, audio_path, participants_hint, processing_profile, transcription_profile, status, created_at, updated_at
          FROM meetings
-         ORDER BY created_at DESC"
+         ORDER BY created_at DESC
+         LIMIT ?1 OFFSET ?2"
     ).map_err(|e| e.to_string())?;
 
     let rows = stmt
-        .query_map([], |row| {
-            Ok(Meeting {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                file_path: row.get(2)?,
-                audio_path: row.get(3)?,
-                participants_hint: row.get(4)?,
-                processing_profile: row.get(5)?,
-                transcription_profile: row.get(6)?,
-                status: row.get(7)?,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
-            })
-        })
+        .query_map(
+            params![normalize_limit(limit), normalize_offset(offset)],
+            |row| {
+                Ok(Meeting {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    file_path: row.get(2)?,
+                    audio_path: row.get(3)?,
+                    participants_hint: row.get(4)?,
+                    processing_profile: row.get(5)?,
+                    transcription_profile: row.get(6)?,
+                    status: row.get(7)?,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                })
+            },
+        )
         .map_err(|e| e.to_string())?;
 
     let mut meetings = Vec::new();
@@ -93,6 +112,16 @@ pub fn get_meetings(state: tauri::State<'_, DbState>) -> Result<Vec<Meeting>, St
         meetings.push(row.map_err(|e| e.to_string())?);
     }
     Ok(meetings)
+}
+
+#[command]
+pub fn get_meetings(
+    state: tauri::State<'_, DbState>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<Vec<Meeting>, String> {
+    let db = state.0.lock().map_err(|e| e.to_string())?;
+    get_meetings_record(&db, limit, offset)
 }
 
 #[command]

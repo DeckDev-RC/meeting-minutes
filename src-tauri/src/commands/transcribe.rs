@@ -1,3 +1,4 @@
+use crate::commands::temp_workspace::{cleanup_temp_workspace, create_temp_workspace};
 use crate::models::audio::ExportedChunk;
 use crate::models::transcription::TranscriptionSegment;
 use base64::{engine::general_purpose, Engine as _};
@@ -887,21 +888,18 @@ pub async fn transcribe_chunks_with_faster_whisper(
     }
 
     let backend = resolve_faster_whisper_backend()?;
-    let output_dir = std::env::temp_dir().join(format!(
-        "meeting-minutes-faster-whisper-{}",
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::create_dir_all(&output_dir)
-        .map_err(|e| format!("Failed to create {}: {e}", output_dir.display()))?;
+    let output_dir = create_temp_workspace("meeting-minutes-faster-whisper").await?;
     let chunks_path = output_dir.join("chunks.json");
     let chunks_json = serde_json::to_string(&audio_chunks)
         .map_err(|e| format!("Failed to serialize local transcription chunks: {e}"))?;
-    std::fs::write(&chunks_path, chunks_json)
+    tokio::fs::write(&chunks_path, chunks_json)
+        .await
         .map_err(|e| format!("Failed to write {}: {e}", chunks_path.display()))?;
     let model = normalize_faster_whisper_model(model);
     let cpu_threads = available_cpu_threads_for_transcription();
 
-    tokio::task::spawn_blocking(move || {
+    let worker_output_dir = output_dir.clone();
+    let result = tokio::task::spawn_blocking(move || {
         let mut command = Command::new(&backend.python_exe);
         hide_command_window(&mut command);
         configure_faster_whisper_python_env(&mut command, &backend);
@@ -911,7 +909,7 @@ pub async fn transcribe_chunks_with_faster_whisper(
             .arg("--chunks-json")
             .arg(&chunks_path)
             .arg("--out-dir")
-            .arg(&output_dir)
+            .arg(&worker_output_dir)
             .arg("--model")
             .arg(model)
             .arg("--device")
@@ -937,7 +935,7 @@ pub async fn transcribe_chunks_with_faster_whisper(
             ));
         }
 
-        let results_path = output_dir.join("chunk-transcription-results.json");
+        let results_path = worker_output_dir.join("chunk-transcription-results.json");
         let raw = std::fs::read_to_string(&results_path)
             .map_err(|e| format!("Failed to read {}: {e}", results_path.display()))?;
         let mut parsed = serde_json::from_str::<Vec<FasterWhisperChunkOutput>>(&raw)
@@ -952,7 +950,9 @@ pub async fn transcribe_chunks_with_faster_whisper(
             .collect::<Vec<_>>())
     })
     .await
-    .map_err(|e| format!("Local faster-whisper worker failed: {e}"))?
+    .map_err(|e| format!("Local faster-whisper worker failed: {e}"))?;
+    cleanup_temp_workspace(&output_dir).await;
+    result
 }
 
 #[command]

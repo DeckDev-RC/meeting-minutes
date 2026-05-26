@@ -27,6 +27,13 @@ async function installUploadMock(page: Page) {
           };
         }
 
+        if (command === "check_local_transcription_backends") {
+          return {
+            fasterWhisperAvailable: true,
+            parakeetAvailable: true,
+          };
+        }
+
         if (command === "save_meeting") {
           (window as unknown as { __SAVED_MEETING__: unknown }).__SAVED_MEETING__ = args.meeting;
           return "meeting-upload-e2e";

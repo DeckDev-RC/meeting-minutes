@@ -30,6 +30,10 @@ pub fn init_db(app_data_dir: &std::path::Path) -> Connection {
     std::fs::create_dir_all(app_data_dir).ok();
     let db_path = app_data_dir.join("db.sqlite");
     let conn = Connection::open(db_path).expect("Failed to open database");
+    conn.pragma_update(None, "journal_mode", "WAL")
+        .expect("Failed to enable WAL journal mode");
+    conn.pragma_update(None, "synchronous", "NORMAL")
+        .expect("Failed to set SQLite synchronous mode");
 
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS meetings (
@@ -85,7 +89,11 @@ pub fn init_db(app_data_dir: &std::path::Path) -> Connection {
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             PRIMARY KEY (meeting_id, index_no)
-        );",
+        );
+        CREATE INDEX IF NOT EXISTS idx_meetings_created ON meetings(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_transcriptions_meeting ON transcriptions(meeting_id);
+        CREATE INDEX IF NOT EXISTS idx_minutes_meeting_created ON minutes(meeting_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_jobs_meeting ON jobs(meeting_id);",
     )
     .expect("Failed to create tables");
     schema::migrate_processing_chunks_schema(&conn)

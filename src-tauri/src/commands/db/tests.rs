@@ -66,6 +66,16 @@ fn table_names(conn: &Connection) -> HashSet<String> {
         .collect()
 }
 
+fn index_names(conn: &Connection) -> HashSet<String> {
+    let mut stmt = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'index'")
+        .unwrap();
+    stmt.query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
 fn row_count(conn: &Connection, table: &str) -> i64 {
     conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
         row.get(0)
@@ -210,6 +220,67 @@ fn init_db_creates_structured_minutes_tables_for_new_databases() {
     assert!(tables.contains("minute_actions"));
     assert!(tables.contains("minute_evidences"));
     assert!(tables.contains("processing_jobs"));
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn init_db_enables_wal_for_file_database() {
+    let dir = temp_app_dir("wal-mode");
+    let conn = init_db(&dir);
+
+    let journal_mode: String = conn
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .unwrap();
+
+    assert_eq!(journal_mode.to_lowercase(), "wal");
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn init_db_creates_lookup_indexes_for_meeting_queries() {
+    let dir = temp_app_dir("meeting-query-indexes");
+    let conn = init_db(&dir);
+
+    let indexes = index_names(&conn);
+
+    assert!(indexes.contains("idx_meetings_created"));
+    assert!(indexes.contains("idx_transcriptions_meeting"));
+    assert!(indexes.contains("idx_minutes_meeting_created"));
+    assert!(indexes.contains("idx_jobs_meeting"));
+    assert!(indexes.contains("idx_processing_jobs_meeting"));
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn get_meetings_record_supports_limit_and_offset() {
+    let dir = temp_app_dir("meetings-pagination");
+    let conn = init_db(&dir);
+
+    for (id, created_at) in [
+        ("meeting-1", "2026-05-24T10:00:00Z"),
+        ("meeting-2", "2026-05-24T11:00:00Z"),
+        ("meeting-3", "2026-05-24T12:00:00Z"),
+    ] {
+        conn.execute(
+            "INSERT INTO meetings
+                (id, title, file_path, processing_profile, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'balanced', 'done', ?4, ?4)",
+            params![id, id, format!("{id}.wav"), created_at],
+        )
+        .unwrap();
+    }
+
+    let page = meetings::get_meetings_record(&conn, Some(2), Some(1)).unwrap();
+
+    assert_eq!(
+        page.into_iter()
+            .map(|meeting| meeting.id)
+            .collect::<Vec<_>>(),
+        vec!["meeting-2".to_string(), "meeting-1".to_string()]
+    );
 
     std::fs::remove_dir_all(dir).ok();
 }

@@ -1,5 +1,6 @@
 import { lazy, Suspense } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import ErrorBoundary from "./components/ErrorBoundary";
 import Layout from "./components/Layout";
 
 const Upload = lazy(() => import("./pages/Upload"));
@@ -19,18 +20,20 @@ function RouteFallback() {
 function App() {
   return (
     <BrowserRouter>
-      <Layout>
-        <Suspense fallback={<RouteFallback />}>
-          <Routes>
-            <Route path="/" element={<Navigate to="/upload" />} />
-            <Route path="/upload" element={<Upload />} />
-            <Route path="/processing/:id" element={<Processing />} />
-            <Route path="/minutes/:id" element={<Minutes />} />
-            <Route path="/history" element={<History />} />
-            <Route path="/settings" element={<Settings />} />
-          </Routes>
-        </Suspense>
-      </Layout>
+      <ErrorBoundary>
+        <Layout>
+          <Suspense fallback={<RouteFallback />}>
+            <Routes>
+              <Route path="/" element={<Navigate to="/upload" />} />
+              <Route path="/upload" element={<Upload />} />
+              <Route path="/processing/:id" element={<Processing />} />
+              <Route path="/minutes/:id" element={<Minutes />} />
+              <Route path="/history" element={<History />} />
+              <Route path="/settings" element={<Settings />} />
+            </Routes>
+          </Suspense>
+        </Layout>
+      </ErrorBoundary>
     </BrowserRouter>
   );
 }

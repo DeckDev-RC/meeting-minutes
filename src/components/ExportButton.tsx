@@ -29,11 +29,14 @@ function createTemporaryMinutesElement(html: string) {
 
 export default function ExportButton({ title, executiveHtml }: Props) {
   const [exporting, setExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState<number | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
 
   const exportPdfFromElement = async (element: HTMLElement, suffix: string) => {
     const { exportToPDF } = await import("../lib/pdfExport");
-    const pdfBytes = await exportToPDF(element, `${title} - ${suffix}`);
+    const pdfBytes = await exportToPDF(element, `${title} - ${suffix}`, {
+      onProgress: ({ percent }) => setExportProgress(percent),
+    });
     const savedPath = await savePdf(Array.from(pdfBytes), safeFileName(title, suffix, "pdf"));
     if (savedPath) await openSavedFolder(savedPath);
   };
@@ -44,6 +47,7 @@ export default function ExportButton({ title, executiveHtml }: Props) {
 
     setMenuOpen(false);
     setExporting(true);
+    setExportProgress(0);
     try {
       if (kind === "executive-pdf") {
         if (executiveHtml) {
@@ -73,6 +77,7 @@ export default function ExportButton({ title, executiveHtml }: Props) {
       if (savedPath) await openSavedFolder(savedPath);
     } finally {
       setExporting(false);
+      setExportProgress(null);
     }
   };
 
@@ -84,7 +89,7 @@ export default function ExportButton({ title, executiveHtml }: Props) {
         disabled={exporting}
         className="rounded-l-lg bg-green-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
       >
-        {exporting ? "Exportando..." : "PDF executivo"}
+        {exporting ? `Exportando ${exportProgress ?? 0}%` : "PDF executivo"}
       </button>
       <button
         type="button"

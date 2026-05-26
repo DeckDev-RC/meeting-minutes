@@ -9,5 +9,6 @@ pub mod minutes_pipeline;
 pub mod minutes_validator;
 pub mod offline_runtime;
 pub mod storage;
+pub(crate) mod temp_workspace;
 pub mod transcribe;
 pub mod transcription_router;

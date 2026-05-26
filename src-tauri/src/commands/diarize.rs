@@ -1,3 +1,4 @@
+use crate::commands::temp_workspace::{cleanup_temp_workspace, create_temp_workspace};
 use crate::models::audio::ExportedChunk;
 use crate::models::transcription::{DiarizedResult, DiarizedSegment, TranscriptionSegment};
 use futures::stream::{self, StreamExt};
@@ -992,14 +993,10 @@ async fn run_modern_cpu_backend(
 ) -> Result<DiarizedResult, String> {
     let backend = resolve_modern_cpu_backend()
         .ok_or_else(|| "Modern CPU diarization backend is not installed".to_string())?;
-    let output_dir = std::env::temp_dir().join(format!(
-        "meeting-minutes-diarize-cpu-{}",
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::create_dir_all(&output_dir)
-        .map_err(|e| format!("Failed to create {}: {e}", output_dir.display()))?;
+    let output_dir = create_temp_workspace("meeting-minutes-diarize-cpu").await?;
 
-    tokio::task::spawn_blocking(move || {
+    let worker_output_dir = output_dir.clone();
+    let result = tokio::task::spawn_blocking(move || {
         let mut command = Command::new(&backend.python_exe);
         hide_command_window(&mut command);
         configure_modern_cpu_python_env(&mut command, &backend);
@@ -1008,7 +1005,7 @@ async fn run_modern_cpu_backend(
             .arg("--audio")
             .arg(&audio_path)
             .arg("--out-dir")
-            .arg(&output_dir);
+            .arg(&worker_output_dir);
 
         if let Some(expected_speakers) = expected_speakers.filter(|value| *value > 0) {
             command
@@ -1026,14 +1023,16 @@ async fn run_modern_cpu_backend(
             ));
         }
 
-        let diarized_path = output_dir.join("diarized-transcription.json");
+        let diarized_path = worker_output_dir.join("diarized-transcription.json");
         let raw = std::fs::read_to_string(&diarized_path)
             .map_err(|e| format!("Failed to read {}: {e}", diarized_path.display()))?;
         serde_json::from_str::<DiarizedResult>(&raw)
             .map_err(|e| format!("Failed to parse modern CPU diarization JSON: {e}"))
     })
     .await
-    .map_err(|e| format!("Modern CPU diarization worker failed: {e}"))?
+    .map_err(|e| format!("Modern CPU diarization worker failed: {e}"))?;
+    cleanup_temp_workspace(&output_dir).await;
+    result
 }
 
 fn stitch_modern_cpu_batch_outputs(
@@ -1079,19 +1078,16 @@ async fn run_modern_cpu_backend_batch(
 ) -> Result<DiarizedResult, String> {
     let backend = resolve_modern_cpu_backend()
         .ok_or_else(|| "Modern CPU diarization backend is not installed".to_string())?;
-    let output_dir = std::env::temp_dir().join(format!(
-        "meeting-minutes-diarize-cpu-batch-{}",
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::create_dir_all(&output_dir)
-        .map_err(|e| format!("Failed to create {}: {e}", output_dir.display()))?;
+    let output_dir = create_temp_workspace("meeting-minutes-diarize-cpu-batch").await?;
     let chunks_path = output_dir.join("chunks.json");
     let chunks_json = serde_json::to_string(&audio_chunks)
         .map_err(|e| format!("Failed to serialize modern CPU chunks: {e}"))?;
-    std::fs::write(&chunks_path, chunks_json)
+    tokio::fs::write(&chunks_path, chunks_json)
+        .await
         .map_err(|e| format!("Failed to write {}: {e}", chunks_path.display()))?;
 
-    tokio::task::spawn_blocking(move || {
+    let worker_output_dir = output_dir.clone();
+    let result = tokio::task::spawn_blocking(move || {
         let mut command = Command::new(&backend.python_exe);
         hide_command_window(&mut command);
         configure_modern_cpu_python_env(&mut command, &backend);
@@ -1100,7 +1096,7 @@ async fn run_modern_cpu_backend_batch(
             .arg("--chunks-json")
             .arg(&chunks_path)
             .arg("--out-dir")
-            .arg(&output_dir)
+            .arg(&worker_output_dir)
             .arg("--max-workers")
             .arg(max_parallel_chunks.max(1).to_string());
 
@@ -1118,13 +1114,15 @@ async fn run_modern_cpu_backend_batch(
             ));
         }
 
-        let results_path = output_dir.join("chunk-diarized-results.json");
+        let results_path = worker_output_dir.join("chunk-diarized-results.json");
         let raw = std::fs::read_to_string(&results_path)
             .map_err(|e| format!("Failed to read {}: {e}", results_path.display()))?;
         stitch_modern_cpu_batch_outputs(&raw, expected_speakers)
     })
     .await
-    .map_err(|e| format!("Modern CPU batch diarization worker failed: {e}"))?
+    .map_err(|e| format!("Modern CPU batch diarization worker failed: {e}"))?;
+    cleanup_temp_workspace(&output_dir).await;
+    result
 }
 
 fn resolve_hf_token() -> Option<String> {
@@ -1167,12 +1165,10 @@ async fn run_pyannote_backend(
         .ok_or_else(|| "Pyannote Community-1 backend is not installed".to_string())?;
     let hf_token = resolve_hf_token()
         .ok_or_else(|| "HF_TOKEN is not available for pyannote Community-1".to_string())?;
-    let output_dir =
-        std::env::temp_dir().join(format!("meeting-minutes-pyannote-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&output_dir)
-        .map_err(|e| format!("Failed to create {}: {e}", output_dir.display()))?;
+    let output_dir = create_temp_workspace("meeting-minutes-pyannote").await?;
 
-    tokio::task::spawn_blocking(move || {
+    let worker_output_dir = output_dir.clone();
+    let result = tokio::task::spawn_blocking(move || {
         let mut command = Command::new(&backend.python_exe);
         hide_command_window(&mut command);
         command
@@ -1181,7 +1177,7 @@ async fn run_pyannote_backend(
             .arg("--audio")
             .arg(&audio_path)
             .arg("--out-dir")
-            .arg(&output_dir);
+            .arg(&worker_output_dir);
 
         if let Some(expected_speakers) = expected_speakers.filter(|value| *value > 0) {
             command
@@ -1199,14 +1195,16 @@ async fn run_pyannote_backend(
             ));
         }
 
-        let diarized_path = output_dir.join("diarized-transcription.json");
+        let diarized_path = worker_output_dir.join("diarized-transcription.json");
         let raw = std::fs::read_to_string(&diarized_path)
             .map_err(|e| format!("Failed to read {}: {e}", diarized_path.display()))?;
         serde_json::from_str::<DiarizedResult>(&raw)
             .map_err(|e| format!("Failed to parse pyannote diarization JSON: {e}"))
     })
     .await
-    .map_err(|e| format!("Pyannote Community-1 worker failed: {e}"))?
+    .map_err(|e| format!("Pyannote Community-1 worker failed: {e}"))?;
+    cleanup_temp_workspace(&output_dir).await;
+    result
 }
 
 pub async fn diarize_audio_with_modern_cpu(
